@@ -66,7 +66,14 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 default = []
 
 [profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
+# 体积优先：本项目是内部工具，不需要极致运行性能，
+# 但安装包越小分发越省事（目标 < 20MB，不含 WebView2）。
+codegen-units = 1     # 单编译单元，LLVM 全局优化更彻底，体积最小
+lto = true            # fat LTO（比 "thin" 更小，编译更慢）
+opt-level = "z"       # 比 "s" 更激进地优化体积
+strip = true          # 剥离所有符号与调试信息
+panic = "abort"       # 省掉 unwind 表（代价：panic 时无 backtrace）
+
+# 测试需要 unwind 才能捕获断言失败
+[profile.test]
+panic = "unwind"

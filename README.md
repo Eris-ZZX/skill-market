@@ -89,6 +89,59 @@ junction 作为高级选项，且必须运行时探测可用性（部分企业�
 | 前端 | React 18 + TypeScript | — |
 | HTTP | reqwest + rustls(**ring**) | 见下方「关于 aws-lc-rs」 |
 
+### 打包体积策略（实测数据）
+
+本项目**假设目标机器已安装 WebView2 Runtime**，因此 `tauri.conf.json` 用：
+
+```json
+"webviewInstallMode": { "type": "skip" }
+```
+
+#### 实测体积
+
+| 项 | 大小 |
+|---|---|
+| `skill-market.exe`（release，已 strip） | **10.31 MB** |
+| zip 压缩后 | **4 MB** |
+| 前端资源（编入 exe） | 178 KB |
+
+对比参考项目 cc-switch：便携包 **19.53 MB**（同为 Tauri + 依赖系统 WebView2）。
+本项目体积约为其一半，原因是 release profile 更激进：
+
+```toml
+[profile.release]
+codegen-units = 1     # cc-switch 用 16（其注释承认这让体积 +17%，换编译快 64%）
+lto = true            # cc-switch 用 "thin"
+opt-level = "z"       # cc-switch 用 "s"
+strip = true
+panic = "abort"       # 省掉 unwind 表
+```
+
+代价是 release 构建慢（fat LTO，约 10-12 分钟），但发布频率低，可以接受。
+
+#### 缺 WebView2 时怎么办
+
+`skip` 模式的代价：机器没装 WebView2 时窗口会白屏。因此代码里加了启动检测：
+
+- 读注册表 `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-...}\pv`
+- 未检测到则弹中文提示，告诉用户去内网共享盘取安装包
+
+WebView2 的实际覆盖情况：
+
+| 系统 | 是否自带 |
+|---|---|
+| Windows 11 | ✅ 自带 |
+| Win10 22H2 / 21H2 等消费版 | ✅ 微软已批量推送，绝大多数有 |
+| Win10 LTSC 2019 / Server / 干净安装 | ⚠️ 可能没有 |
+
+**上线前建议抽查 5-10 台真实办公机**：
+
+```powershell
+(Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" -EA SilentlyContinue).pv
+```
+
+有输出即已安装。若发现缺失较多，改回 `{"type":"offlineInstaller","silent":true}` 重新打包即可（包体变为约 160MB）。
+
 ### 关于 aws-lc-rs
 
 `rustls` 默认的加密后端是 `aws-lc-rs`，它包含 NASM 汇编文件。在某些企业 DLP 环境下，这些文件会被**实时加密拦截**，导致编译失败（错误表现为 `%TSD-Header%` 或 `label or instruction expected`）。

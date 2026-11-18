@@ -13,6 +13,80 @@
 //! - `install`     部署引擎（复制 / junction）
 //! - `commands`    Tauri 命令层
 
+/// 读取 WebView2 Runtime 版本号
+///
+/// 注册表位置（微软官方文档给的判定方式）：
+/// - 机器级：HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}\pv
+/// - 用户级：HKCU\Software\Microsoft\EdgeUpdate\Clients\{同上}\pv
+///
+/// 两处都没有就是没装。返回 None 表示未安装。
+#[cfg(windows)]
+fn detect_webview2_version() -> Option<String> {
+    use std::process::Command;
+
+    const GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    let paths = [
+        format!(r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{GUID}"),
+        format!(r"HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{GUID}"),
+        format!(r"HKCU\Software\Microsoft\EdgeUpdate\Clients\{GUID}"),
+    ];
+
+    for key in paths {
+        let out = Command::new("reg")
+            .args(["query", &key, "/v", "pv"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        // 输出形如：    pv    REG_SZ    157.0.4341.46
+        if let Some(line) = text.lines().find(|l| l.contains("REG_SZ")) {
+            if let Some(v) = line.split_whitespace().last() {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn detect_webview2_version() -> Option<String> {
+    Some("non-windows".into())
+}
+
+/// 缺 WebView2 时给出可操作的中文提示，而不是静默白屏
+#[cfg(windows)]
+fn show_webview2_missing_dialog() {
+    use std::process::Command;
+    let msg = "Skill Market 需要 Microsoft Edge WebView2 运行时，但当前系统没有安装。\\n\\n\
+               解决方法：\\n\
+               1. 从内网共享盘获取 MicrosoftEdgeWebView2RuntimeInstallerX64.exe 并安装\\n\
+               2. 或联系 IT 协助安装\\n\\n\
+               安装完成后重新启动本程序。\\n\\n\
+               说明：Windows 11 自带该组件；Windows 10 部分版本需要单独安装。";
+    // 用 PowerShell 弹窗，避免在窗口创建失败时依赖 GUI 库
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &format!(
+                "Add-Type -AssemblyName System.Windows.Forms; \
+                 [System.Windows.Forms.MessageBox]::Show('{msg}', 'Skill Market 无法启动', \
+                 [System.Windows.Forms.MessageBoxButtons]::OK, \
+                 [System.Windows.Forms.MessageBoxIcon]::Warning)"
+            ),
+        ])
+        .spawn();
+}
+
+#[cfg(not(windows))]
+fn show_webview2_missing_dialog() {}
+
 use tauri::Manager;
 
 pub mod commands;
@@ -114,6 +188,21 @@ pub fn run() {
             )?;
 
             log::info!("Skill Market 启动");
+
+            // WebView2 检测
+            //
+            // tauri.conf 用的是 webviewInstallMode = "skip"（不打包运行时，
+            // 依赖系统已装），好处是安装包只有 ~20MB。代价是：
+            // 若目标机器没有 WebView2，主窗口会白屏且无任何提示。
+            //
+            // 实测：Win11 自带；Win10 22H2 多数已被微软推送；
+            // Win10 LTSC 2019 / Server / 干净安装 可能没有。
+            if let Some(ver) = detect_webview2_version() {
+                log::info!("WebView2 Runtime: {ver}");
+            } else {
+                log::error!("未检测到 WebView2 Runtime，界面将无法渲染");
+                show_webview2_missing_dialog();
+            }
 
             // 窗口校正：确保窗口完整落在当前显示器的工作区内。
             //
