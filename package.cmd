@@ -50,25 +50,37 @@ REM --- 收集产物 ---
 echo [3/3] 收集产物...
 if not exist "dist-release" mkdir "dist-release"
 
-set MSI_SRC=src-tauri\target\release\bundle\msi
-set MSI_FOUND=0
-for %%f in ("%MSI_SRC%\*.msi") do (
-  if exist "%%f" (
-    copy /y "%%f" "dist-release\" >nul
-    set MSI_FOUND=1
-    echo   MSI: %%~nxf
-  )
+REM CARGO_TARGET_DIR 可能被外部设置（如本机为 C:\ck 以规避路径过长），
+REM 因此产物目录要跟着变，不能写死 src-tauri\target。
+if defined CARGO_TARGET_DIR (
+  set TARGET_ROOT=%CARGO_TARGET_DIR%
+  echo   [info] 使用 CARGO_TARGET_DIR=%CARGO_TARGET_DIR%
+) else (
+  set TARGET_ROOT=%~dp0src-tauri\target
 )
 
-set EXE_SRC=src-tauri\target\release\skill-market.exe
+set MSI_SRC=%TARGET_ROOT%\release\bundle\msi
+set EXE_SRC=%TARGET_ROOT%\release\skill-market.exe
+
+if exist "%MSI_SRC%" (
+  for %%f in ("%MSI_SRC%\*.msi") do (
+    copy /y "%%f" "%~dp0dist-release\" >nul 2>&1
+    echo   MSI: %%~nxf
+  )
+) else (
+  echo   [WARN] 未找到 MSI 源目录: %MSI_SRC%
+)
+
 if exist "%EXE_SRC%" (
-  if exist "dist-release\portable" rmdir /s /q "dist-release\portable"
-  mkdir "dist-release\portable"
-  copy /y "%EXE_SRC%" "dist-release\portable\" >nul
-  echo portable=true> "dist-release\portable\portable.ini"
-  powershell -NoProfile -Command "Compress-Archive -Path 'dist-release\portable\*' -DestinationPath 'dist-release\SkillMarket-Portable.zip' -Force"
-  rmdir /s /q "dist-release\portable"
+  if exist "%~dp0dist-release\portable" rmdir /s /q "%~dp0dist-release\portable"
+  mkdir "%~dp0dist-release\portable"
+  copy /y "%EXE_SRC%" "%~dp0dist-release\portable\" >nul
+  echo portable=true> "%~dp0dist-release\portable\portable.ini"
+  powershell -NoProfile -Command "Compress-Archive -Path '%~dp0dist-release\portable\*' -DestinationPath '%~dp0dist-release\SkillMarket-Portable.zip' -Force"
+  rmdir /s /q "%~dp0dist-release\portable"
   echo   Portable: SkillMarket-Portable.zip
+) else (
+  echo   [WARN] 未找到 exe: %EXE_SRC%
 )
 
 echo.
