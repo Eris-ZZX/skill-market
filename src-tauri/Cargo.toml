@@ -1,0 +1,72 @@
+[package]
+name = "skill-market"
+version = "0.1.0"
+description = "内网 Skill 市场 — 面向 AI 编码工具的技能分发客户端"
+authors = ["your-team"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85.0"
+
+[lib]
+name = "skill_market_lib"
+crate-type = ["rlib"]
+doctest = false
+
+[build-dependencies]
+tauri-build = { version = "2.4.0", features = [] }
+
+[dependencies]
+# --- Tauri 核心 ---
+tauri = { version = "2.8.2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-log = "2"
+tauri-plugin-store = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+
+# --- 序列化 ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = "0.9"
+toml = "0.8"
+
+# --- 基础设施 ---
+anyhow = "1.0"
+thiserror = "2"
+log = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+tempfile = "3"
+url = "2"
+
+# --- 哈希（技能内容更新检测）---
+sha2 = "0.10"
+
+# --- HTTP（GitLab API、归档下载）---
+# 注意：必须用 ring 而非 aws-lc-rs —— 后者含 NASM 汇编，
+# 在公司 DLP 环境下会被加密拦截，导致编译失败。
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "charset",
+  "http2",
+  "rustls-tls-native-roots-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+# --- 归档解压（技能包）---
+zip = "2.2"
+
+# --- 数据库（技能安装状态）---
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[features]
+default = []
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

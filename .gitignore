@@ -1,0 +1,64 @@
+# ========== 参考副本（105MB，非本项目代码）==========
+_ref-cc-switch/
+
+# ========== 依赖 ==========
+node_modules/
+.pnpm-store/
+
+# ========== 构建产物 ==========
+dist/
+build/
+src-tauri/target/
+*.exe
+*.msi
+*.dll
+*.pdb
+*.lib
+*.exp
+*.ilk
+*.map
+*.obj
+
+# ========== Rust ==========
+target/
+Cargo.lock.orig
+
+# ========== 日志 ==========
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ========== 测试与临时 ==========
+coverage/
+.nyc_output/
+*.tmp
+*.temp
+_*.png
+_*.ps1
+_*.log
+
+# ========== 编辑器 / IDE ==========
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ========== 环境与密钥（重要）==========
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.pfx
+secrets*
+state.json
+!src-tauri/state.json.example
+
+# ========== 本地配置覆盖 ==========
+src-tauri/tauri.local.conf.json
+*.local.json
