@@ -24,16 +24,22 @@ where pnpm >nul 2>&1 || (echo [ERROR] 未找到 pnpm & exit /b 1)
 where cargo >nul 2>&1 || (echo [ERROR] 未找到 cargo & exit /b 1)
 
 REM --- WiX 预检 ---
-REM 首次打包时 Tauri 会从 GitHub 下载 WiX 工具链，国内网络常卡住。
-REM 若本地已有缓存，这里跳过下载；没有则提示用户。
-set WIX_CACHE=%LOCALAPPDATA%\tauri\WiX
+REM 首次打包时 Tauri 会从 GitHub 下载 WiX 工具链（约 5MB），
+REM 国内网络常卡住甚至失败（报 "Peer disconnected"）。
+REM 缓存位置：%LOCALAPPDATA%\tauri\WixTools314
+set WIX_CACHE=%LOCALAPPDATA%\tauri\WixTools314
 if not exist "%WIX_CACHE%" (
   echo.
   echo [WARN] 未找到 WiX 工具链缓存 ^(%WIX_CACHE%^)
-  echo        首次打包需要从 GitHub 下载，可能很慢或失败。
-  echo        若长时间无响应，可从以下地址手动下载后解压到该目录：
-  echo        https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
   echo.
+  echo        首次打包需要从 GitHub 下载，国内网络可能失败并报
+  echo        "Peer disconnected"。若本次构建卡住，可手动预置：
+  echo.
+  echo        1. 下载 https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+  echo        2. 解压到 %WIX_CACHE%
+  echo        3. 重新运行本脚本
+  echo.
+  pause
 )
 
 REM --- 构建前端 ---
