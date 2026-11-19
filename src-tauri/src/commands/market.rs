@@ -208,6 +208,7 @@ pub async fn install_from_repo(
     name: &str,
     repo_path: &str,
     tools: &[String],
+    mode: InstallMode,
     allow_create_skills_dir: bool,
 ) -> Result<Vec<InstalledSkill>> {
     if tools.is_empty() {
@@ -231,34 +232,32 @@ pub async fn install_from_repo(
         .ok()
         .and_then(|m| m.version);
 
-    let mut results = Vec::new();
-    for tool_key in tools {
-        let kind = ToolKind::from_key(tool_key)
-            .ok_or_else(|| anyhow::anyhow!("未知工具: {tool_key}"))?;
+    let kinds: Vec<ToolKind> = tools
+        .iter()
+        .map(|k| ToolKind::from_key(k).ok_or_else(|| anyhow::anyhow!("未知工具: {k}")))
+        .collect::<Result<_>>()?;
 
-        let rec = install::install(
-            kind,
-            name,
-            &extracted,
-            InstallMode::Copy,
-            SkillSource {
-                kind: SourceKind::Gitlab,
-                repo_url: Some(format!(
-                    "{}/{}",
-                    cfg.base_url.trim_end_matches('/'),
-                    cfg.project_path
-                )),
-                repo_path: Some(repo_path.to_string()),
-                branch: Some(cfg.branch.clone()),
-                commit: Some(head.clone()),
-            },
-            version.clone(),
-            allow_create_skills_dir,
-        )?;
-        results.push(rec);
-    }
-
-    Ok(results)
+    let library_root = crate::storage::library_dir()?;
+    install::install_many(
+        name,
+        &extracted,
+        mode,
+        &kinds,
+        SkillSource {
+            kind: SourceKind::Gitlab,
+            repo_url: Some(format!(
+                "{}/{}",
+                cfg.base_url.trim_end_matches('/'),
+                cfg.project_path
+            )),
+            repo_path: Some(repo_path.to_string()),
+            branch: Some(cfg.branch.clone()),
+            commit: Some(head.clone()),
+        },
+        version,
+        allow_create_skills_dir,
+        &library_root,
+    )
 }
 
 pub fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {

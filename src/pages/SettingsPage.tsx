@@ -126,6 +126,25 @@ export default function SettingsPage({
         </div>
 
         <div className="field">
+          <label>默认安装方式</label>
+          <select
+            value={form.defaultInstallMode}
+            onChange={(e) =>
+              set("defaultInstallMode", e.target.value as AppSettings["defaultInstallMode"])
+            }
+          >
+            <option value="junction">链接（推荐）</option>
+            <option value="copy">复制</option>
+            <option value="auto">自动（链接失败则复制）</option>
+            <option value="symlink">软链</option>
+          </select>
+          <div className="hint">
+            链接方式下技能只在 library 目录存一份，各工具目录里放指针，
+            改一处处处生效。复制方式每个工具各存一份独立副本。
+          </div>
+        </div>
+
+        <div className="field">
           <label>发布人署名</label>
           <input
             placeholder="姓名/工号，如 张三/1234"

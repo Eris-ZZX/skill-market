@@ -34,10 +34,14 @@ pub struct InstalledSkill {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstallMode {
-    /// 复制独立副本（默认）
+    /// 复制独立副本
     Copy,
-    /// 目录 junction 指向统一库（高级选项，需运行时探测可用性）
+    /// 目录 junction 指向统一库（Windows 专用，不需要开发者模式）
     Junction,
+    /// 目录软链指向统一库（Windows 上需要开发者模式或管理员权限）
+    Symlink,
+    /// 先试 junction，失败回退 copy
+    Auto,
 }
 
 /// 技能的来源

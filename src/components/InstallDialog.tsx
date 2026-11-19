@@ -1,5 +1,12 @@
 import { useState } from "react";
-import { api, InstalledSkill, RemoteSkill, ToolDetection } from "../api";
+import {
+  api,
+  INSTALL_MODE_LABEL,
+  InstallMode,
+  InstalledSkill,
+  RemoteSkill,
+  ToolDetection,
+} from "../api";
 
 interface Props {
   skill: RemoteSkill;
@@ -25,6 +32,7 @@ export default function InstallDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needCreateDir, setNeedCreateDir] = useState(false);
+  const [usedMode, setUsedMode] = useState<InstallMode | null>(null);
 
   const toggle = (key: string) => {
     setSelected((prev) =>
@@ -42,6 +50,8 @@ export default function InstallDialog({
         tools: selected,
         allowCreateSkillsDir: allowCreate,
       });
+      // 记录实际采用的方式：Auto 可能被解析成 junction 或 copy
+      setUsedMode(recs[0]?.mode ?? null);
       onDone(recs);
     } catch (e) {
       const msg = String(e);
@@ -139,6 +149,15 @@ export default function InstallDialog({
               {alreadyInstalled.length > 0 && (
                 <div className="hint">
                   该技能已安装在：{alreadyInstalled.join("、")}
+                </div>
+              )}
+
+              {usedMode && (
+                <div className="hint">
+                  本次使用方式：{INSTALL_MODE_LABEL[usedMode]}
+                  {usedMode === "copy" && "（每个工具各存一份副本）"}
+                  {(usedMode === "junction" || usedMode === "symlink") &&
+                    "（各工具目录里是指向 library 的指针）"}
                 </div>
               )}
             </div>
