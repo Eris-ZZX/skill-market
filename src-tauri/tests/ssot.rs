@@ -5,8 +5,8 @@
 //! 写死的 home 目录。
 
 use skill_market_lib::install::{
-    deploy_to_paths, ensure_distinct_skill_roots, is_link, make_symlink, remove_installed,
-    sanitize_install_name, symlink_supported,
+    deploy_to_paths, ensure_distinct_skill_roots, is_link, junction_supported, make_symlink,
+    remove_installed, sanitize_install_name, symlink_supported,
 };
 use skill_market_lib::state::InstallMode;
 use std::fs;
@@ -175,7 +175,7 @@ fn 老格式_copy_与_junction_仍能反序列化() {
 }
 
 #[test]
-fn auto_在无_junction_的平台上回退到_copy() {
+fn auto_根据环境能力选择_junction_或_copy() {
     let d = tempfile::tempdir().unwrap();
     let src = skill(d.path(), "demo");
     let lib = d.path().join("library");
@@ -184,10 +184,51 @@ fn auto_在无_junction_的平台上回退到_copy() {
     let (_ssot, used) =
         deploy_to_paths(&src, &lib, &[target.clone()], InstallMode::Auto).unwrap();
 
-    // Linux 上 junction 不可用 → 必须回退 copy 且真的复制了文件
-    assert_eq!(used, vec![InstallMode::Copy]);
-    assert!(!is_link(&target));
+    // 断言实际采用什么与环境能力一致，而不是硬编码某一种。
+    // Windows 的 junction 不需要开发者模式，Auto 会优先用它；
+    // Linux 上 junction 不存在，Auto 才回退 copy。
+    if junction_supported() {
+        assert_eq!(
+            used,
+            vec![InstallMode::Junction],
+            "有 junction 能力时应优先用 junction"
+        );
+        assert!(is_link(&target), "junction 在文件系统层面是重解析点");
+    } else {
+        assert_eq!(
+            used,
+            vec![InstallMode::Copy],
+            "无 junction 能力时应回退 copy"
+        );
+        assert!(!is_link(&target));
+    }
+    // 无论哪种，内容必须可读
     assert!(target.join("SKILL.md").is_file());
+}
+
+#[test]
+fn 显式_junction_在不支持时报错而不降级() {
+    // junction 可用的机器上构造不出「不支持」的环境，跳过；
+    // 非 Windows 平台必然不支持，Windows 上探测失败时同样适用
+    #[cfg(windows)]
+    {
+        if junction_supported() {
+            eprintln!("跳过：本机 junction 可用，无法构造不支持的环境");
+            return;
+        }
+    }
+
+    let d = tempfile::tempdir().unwrap();
+    let src = skill(d.path(), "demo");
+    let lib = d.path().join("library");
+    let target = d.path().join("t").join("skills").join("demo");
+
+    let err = deploy_to_paths(&src, &lib, &[target.clone()], InstallMode::Junction).unwrap_err();
+    assert!(
+        err.to_string().contains("junction"),
+        "应报 junction 失败而不是静默降级: {err}"
+    );
+    assert!(!target.exists(), "失败时不得留下目标目录");
 }
 
 #[test]
