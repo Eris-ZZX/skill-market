@@ -95,6 +95,7 @@ pub mod gitlab;
 pub mod hash;
 pub mod install;
 pub mod publish;
+pub mod scan;
 pub mod state;
 pub mod storage;
 pub mod tools;
@@ -244,6 +245,9 @@ pub fn run() {
             commands::list_remote_skills,
             // 安装管理
             commands::list_installed,
+            commands::scan_skills,
+            commands::adopt_skill,
+            commands::state_health,
             commands::install_skill,
             commands::uninstall_skill,
             commands::check_updates,

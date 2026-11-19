@@ -3,7 +3,9 @@
 //! 前端只能通过这里的命令访问后端能力。
 //! 所有命令返回 `Result<T, String>`，错误直接展示给用户。
 
-use crate::state::{judge_record, InstalledSkill, UpdateStatus};
+use crate::state::{
+    judge_record, InstallMode, InstalledSkill, SkillSource, SourceKind, UpdateStatus,
+};
 use crate::storage::{AppSettings, PersistedState};
 use crate::tools::{self, ToolDetection, ToolKind};
 use serde::Serialize;
@@ -13,19 +15,44 @@ use tauri::State;
 /// 应用运行时状态
 pub struct AppState {
     pub inner: Mutex<PersistedState>,
+    /// 状态文件健康提示；None 表示正常
+    pub health: Mutex<Option<String>>,
 }
 
 impl AppState {
     pub fn load() -> Self {
-        let state = crate::storage::load().unwrap_or_default();
+        let (state, health) = match crate::storage::load() {
+            crate::storage::LoadOutcome::Ok(s) => (s, None),
+            crate::storage::LoadOutcome::Recovered { state, from } => (
+                state,
+                Some(format!(
+                    "安装记录文件已损坏，已备份并从上次备份恢复（{}）",
+                    from.display()
+                )),
+            ),
+            crate::storage::LoadOutcome::Corrupt { backup } => (
+                PersistedState::default(),
+                Some(format!(
+                    "安装记录文件已损坏，已备份为 {}。当前列表来自磁盘扫描，安装记录需要重新纳入。",
+                    backup.display()
+                )),
+            ),
+        };
         Self {
             inner: Mutex::new(state),
+            health: Mutex::new(health),
         }
     }
 }
 
 fn lock<'a>(s: &'a State<'_, AppState>) -> Result<std::sync::MutexGuard<'a, PersistedState>, String> {
     s.inner.lock().map_err(|_| "状态锁已损坏".to_string())
+}
+
+/// 状态文件的健康提示；None 表示一切正常
+#[tauri::command]
+pub fn state_health(state: State<'_, AppState>) -> Option<String> {
+    state.health.lock().ok().and_then(|g| g.clone())
 }
 
 // ========== 工具探测 ==========
@@ -114,6 +141,190 @@ pub struct RemoteSkillView {
 #[tauri::command]
 pub fn list_installed(state: State<'_, AppState>) -> Result<Vec<InstalledSkill>, String> {
     Ok(lock(&state)?.installs.clone())
+}
+
+/// 「我的技能」里的一行（按技能名聚合）
+///
+/// 数据来自磁盘扫描，`state.json` 只用来补齐来源与安装时指纹。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MySkillItem {
+    pub name: String,
+    pub tools: Vec<String>,
+    pub target_paths: Vec<String>,
+    pub description: String,
+    pub version: Option<String>,
+    /// managed | external | local
+    pub identity: String,
+    /// 仅 managed 有值：其余身份没有可比的来源，判不了就不猜
+    pub status: Option<UpdateStatus>,
+    pub installed_version: Option<String>,
+}
+
+/// 身份判定
+///
+/// 优先级 managed > external > local。external 还需目标路径不在本应用
+/// 数据目录下——指向自己 library 的重解析点是本客户端自己的 junction。
+pub fn judge_identity(
+    target_path: &str,
+    tool: &str,
+    is_link: bool,
+    link_target: Option<&str>,
+    installs: &[InstalledSkill],
+    app_data: Option<&str>,
+) -> &'static str {
+    let managed = installs
+        .iter()
+        .any(|r| r.tool == tool && r.target_path == target_path);
+    if managed {
+        return "managed";
+    }
+    if is_link {
+        // 只看到软链但读不到目标时，保守地当成外部管理：不该动它
+        let outside = match (link_target, app_data) {
+            (Some(t), Some(base)) => !t.starts_with(base),
+            (None, _) => true,
+            (Some(_), None) => true,
+        };
+        if outside {
+            return "external";
+        }
+    }
+    "local"
+}
+
+/// 扫描本机所有技能，按技能名聚合成「我的技能」列表
+#[tauri::command]
+pub fn scan_skills(state: State<'_, AppState>) -> Result<Vec<MySkillItem>, String> {
+    let scanned = crate::scan::scan_all();
+    let installs = lock(&state)?.installs.clone();
+    let app_data = crate::storage::app_data_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+
+    Ok(build_my_skills(&scanned, &installs, app_data.as_deref()))
+}
+
+/// 把扫描结果与安装记录合并成按名聚合的列表
+pub fn build_my_skills(
+    scanned: &[crate::scan::ScannedSkill],
+    installs: &[InstalledSkill],
+    app_data: Option<&str>,
+) -> Vec<MySkillItem> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_name: std::collections::HashMap<String, MySkillItem> = Default::default();
+
+    for s in scanned {
+        let identity = judge_identity(
+            &s.target_path,
+            &s.tool,
+            s.is_link,
+            s.link_target.as_deref(),
+            installs,
+            app_data,
+        );
+        let rec = (identity == "managed")
+            .then(|| {
+                installs
+                    .iter()
+                    .find(|r| r.tool == s.tool && r.target_path == s.target_path)
+            })
+            .flatten();
+
+        let entry = by_name.entry(s.name.clone()).or_insert_with(|| {
+            order.push(s.name.clone());
+            MySkillItem {
+                name: s.name.clone(),
+                tools: Vec::new(),
+                target_paths: Vec::new(),
+                description: s.description.clone(),
+                version: s.version.clone(),
+                identity: "local".into(),
+                status: None,
+                installed_version: None,
+            }
+        });
+
+        entry.tools.push(s.tool.clone());
+        entry.target_paths.push(s.target_path.clone());
+        if entry.description.is_empty() {
+            entry.description = s.description.clone();
+        }
+        if entry.version.is_none() {
+            entry.version = s.version.clone();
+        }
+
+        // 聚合时取最高优先级：managed > external > local
+        let rank = |id: &str| match id {
+            "managed" => 2,
+            "external" => 1,
+            _ => 0,
+        };
+        if rank(identity) > rank(&entry.identity) {
+            entry.identity = identity.to_string();
+        }
+        if let Some(r) = rec {
+            entry.installed_version = r.installed_version.clone();
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|n| by_name.remove(&n))
+        .collect()
+}
+
+/// 构造一条「纳入管理」的安装记录
+///
+/// 只写本地来源，四个远端字段全为 None——猜来源比留空更糟：
+/// 猜错会让后续的更新判定去覆盖一个其实来自别处的技能。
+pub fn adopt_record(name: String, tool: String, target_path: String) -> Result<InstalledSkill, String> {
+    let dir = std::path::Path::new(&target_path);
+    if !dir.join("SKILL.md").is_file() {
+        return Err(format!("{target_path} 下没有 SKILL.md"));
+    }
+    let installed_hash = crate::hash::hash_dir(dir).map_err(|e| e.to_string())?;
+    let meta = crate::frontmatter::SkillMeta::from_dir(dir).ok();
+
+    Ok(InstalledSkill {
+        name,
+        tool,
+        target_path,
+        mode: InstallMode::Copy,
+        installed_hash,
+        installed_version: meta.as_ref().and_then(|m| m.version.clone()),
+        source: SkillSource {
+            kind: SourceKind::Local,
+            repo_url: None,
+            repo_path: None,
+            branch: None,
+            commit: None,
+        },
+        installed_at: chrono::Utc::now().timestamp(),
+    })
+}
+
+/// 把扫描到的「本地已有」技能纳入管理
+#[tauri::command]
+pub fn adopt_skill(
+    state: State<'_, AppState>,
+    name: String,
+    tool: String,
+    target_path: String,
+) -> Result<InstalledSkill, String> {
+    let rec = adopt_record(name, tool, target_path)?;
+
+    let mut guard = lock(&state)?;
+    if guard
+        .installs
+        .iter()
+        .any(|r| r.name == rec.name && r.tool == rec.tool)
+    {
+        return Err(format!("{} 已存在于 {} 的安装记录中", rec.name, rec.tool));
+    }
+    guard.installs.push(rec.clone());
+    crate::storage::save(&guard).map_err(|e| e.to_string())?;
+    Ok(rec)
 }
 
 /// 安装一个技能

@@ -74,26 +74,95 @@ pub fn state_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("state.json"))
 }
 
-/// 读取状态；文件不存在时返回默认值
-pub fn load() -> Result<PersistedState> {
-    let path = state_path()?;
+/// 读取状态的结果
+///
+/// 调用方必须区分「正常」与「坏了」——把损坏当成空状态会让下一次保存
+/// 用空数据覆盖原文件，用户的安装记录就永久丢了。
+pub enum LoadOutcome {
+    Ok(PersistedState),
+    /// 原文件损坏，内容已留档，从 state.json.bak 恢复成功
+    Recovered { state: PersistedState, from: PathBuf },
+    /// 原文件损坏且没有可用备份，内容已留档
+    Corrupt { backup: PathBuf },
+}
+
+pub fn backup_path() -> Result<PathBuf> {
+    Ok(app_data_dir()?.join("state.json.bak"))
+}
+
+/// 读取状态
+///
+/// 文件不存在是首次启动，返回默认值；解析失败则留档并尝试从备份恢复。
+pub fn load() -> LoadOutcome {
+    let (Ok(path), Ok(bak)) = (state_path(), backup_path()) else {
+        return LoadOutcome::Ok(default_state());
+    };
+    load_from(&path, &bak)
+}
+
+/// 从指定路径读取（测试用，避免碰真实 AppData）
+pub fn load_from(path: &Path, bak: &Path) -> LoadOutcome {
     if !path.is_file() {
-        return Ok(PersistedState {
-            schema_version: default_schema_version(),
-            ..Default::default()
-        });
+        return LoadOutcome::Ok(default_state());
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("读取状态文件失败: {}", path.display()))?;
-    let state: PersistedState = serde_json::from_str(&raw)
-        .with_context(|| format!("状态文件格式损坏: {}", path.display()))?;
-    Ok(state)
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("读取状态文件失败: {e}");
+            return LoadOutcome::Ok(default_state());
+        }
+    };
+    if let Ok(state) = serde_json::from_str::<PersistedState>(&raw) {
+        return LoadOutcome::Ok(state);
+    }
+
+    // 解析失败：先留档，再试备份
+    let corrupt = path.with_file_name(format!(
+        "{}.corrupt-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        chrono::Local::now().format("%Y%m%d%H%M%S")
+    ));
+    if let Err(e) = std::fs::rename(path, &corrupt) {
+        log::error!("状态文件损坏，留档失败: {e}");
+    } else {
+        log::error!("状态文件损坏，已留档为 {}", corrupt.display());
+    }
+
+    if let Ok(raw) = std::fs::read_to_string(bak) {
+        if let Ok(state) = serde_json::from_str::<PersistedState>(&raw) {
+            log::warn!("已从备份恢复状态: {}", bak.display());
+            return LoadOutcome::Recovered {
+                state,
+                from: bak.to_path_buf(),
+            };
+        }
+    }
+    LoadOutcome::Corrupt { backup: corrupt }
+}
+
+fn default_state() -> PersistedState {
+    PersistedState {
+        schema_version: default_schema_version(),
+        ..Default::default()
+    }
 }
 
 /// 原子写入状态
+///
+/// 写之前先把现有文件复制成 state.json.bak，这样即使下一次读到半截文件
+/// 也还有上一份可恢复。
 pub fn save(state: &PersistedState) -> Result<()> {
     let path = state_path()?;
-    atomic_write_json(&path, state)
+    let bak = backup_path()?;
+    save_to(&path, &bak, state)
+}
+
+/// 写到指定路径（测试用）
+pub fn save_to(path: &Path, bak: &Path, state: &PersistedState) -> Result<()> {
+    if path.is_file() {
+        let _ = std::fs::copy(path, bak);
+    }
+    atomic_write_json(path, state)
 }
 
 /// 原子写 JSON：先写临时文件，再替换目标
@@ -150,5 +219,116 @@ mod tests {
         let raw = std::fs::read_to_string(&p).unwrap();
         let back: PersistedState = serde_json::from_str(&raw).unwrap();
         assert_eq!(back.settings.gitlab_project_path, "group/skills");
+    }
+
+    fn paths(dir: &Path) -> (PathBuf, PathBuf) {
+        (dir.join("state.json"), dir.join("state.json.bak"))
+    }
+
+    #[test]
+    fn load_missing_file_returns_default() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bak) = paths(d.path());
+        assert!(matches!(load_from(&p, &bak), LoadOutcome::Ok(_)));
+    }
+
+    #[test]
+    fn load_valid_file_returns_ok() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bak) = paths(d.path());
+        let s = PersistedState {
+            schema_version: 1,
+            ..Default::default()
+        };
+        atomic_write_json(&p, &s).unwrap();
+        match load_from(&p, &bak) {
+            LoadOutcome::Ok(got) => assert_eq!(got.schema_version, 1),
+            _ => panic!("应判定为 Ok"),
+        }
+    }
+
+    #[test]
+    fn load_corrupt_recovers_from_backup() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bak) = paths(d.path());
+
+        let good = PersistedState {
+            schema_version: 1,
+            settings: AppSettings {
+                gitlab_project_path: "group/from-backup".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        std::fs::write(&bak, serde_json::to_string(&good).unwrap()).unwrap();
+        std::fs::write(&p, "{ this is not json").unwrap();
+
+        match load_from(&p, &bak) {
+            LoadOutcome::Recovered { state, .. } => {
+                assert_eq!(state.settings.gitlab_project_path, "group/from-backup");
+            }
+            _ => panic!("应判定为 Recovered"),
+        }
+
+        // 原损坏内容必须留档且内容完好，不能被删
+        let corrupt: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(corrupt.len(), 1, "应留下一个 .corrupt-* 文件");
+        let saved = std::fs::read_to_string(corrupt[0].path()).unwrap();
+        assert_eq!(saved, "{ this is not json", "留档必须保留原始内容");
+        assert!(!p.exists(), "损坏文件应已改名，不再是 state.json");
+    }
+
+    #[test]
+    fn load_corrupt_without_backup_is_corrupt_and_keeps_content() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bak) = paths(d.path());
+        std::fs::write(&p, "totally broken").unwrap();
+
+        match load_from(&p, &bak) {
+            LoadOutcome::Corrupt { backup } => {
+                assert!(backup.exists());
+                assert_eq!(std::fs::read_to_string(&backup).unwrap(), "totally broken");
+            }
+            _ => panic!("应判定为 Corrupt"),
+        }
+    }
+
+    #[test]
+    fn save_creates_bak_of_previous_content() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bak) = paths(d.path());
+
+        let first = PersistedState {
+            schema_version: 1,
+            settings: AppSettings {
+                gitlab_project_path: "group/first".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        save_to(&p, &bak, &first).unwrap();
+        assert!(!bak.exists(), "首次保存时没有旧文件，不该产生 bak");
+
+        let second = PersistedState {
+            schema_version: 1,
+            settings: AppSettings {
+                gitlab_project_path: "group/second".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        save_to(&p, &bak, &second).unwrap();
+
+        assert!(bak.is_file(), "第二次保存前应生成 state.json.bak");
+        let saved: PersistedState =
+            serde_json::from_str(&std::fs::read_to_string(&bak).unwrap()).unwrap();
+        assert_eq!(
+            saved.settings.gitlab_project_path, "group/first",
+            "bak 必须是上一份内容"
+        );
     }
 }

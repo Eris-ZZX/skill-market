@@ -8,7 +8,8 @@
     "dev:renderer": "vite",
     "build:renderer": "vite build",
     "tauri": "tauri",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:renderer": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
