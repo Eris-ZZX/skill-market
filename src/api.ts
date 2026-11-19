@@ -134,6 +134,61 @@ export interface MySkillItem {
   installedVersion: string | null;
 }
 
+/** 一个技能在某个工具下的一次落盘 */
+export interface SkillPlacement {
+  tool: string;
+  targetPath: string;
+}
+
+/**
+ * 把 `tools` 与 `targetPaths` 按索引配成对
+ *
+ * 后端保证两者同长同序，但界面不应依赖 indexOf 反查——那在
+ * 同名工具重复或数组错位时会静默取错路径。
+ */
+export function placements(item: MySkillItem): SkillPlacement[] {
+  return item.tools.map((tool, i) => ({
+    tool,
+    targetPath: item.targetPaths[i] ?? "",
+  }));
+}
+
+/** 需要用户处理的更新状态 */
+const PENDING_STATUSES: UpdateStatus[] = [
+  "updateavailable",
+  "conflict",
+  "locallymodified",
+  "localmissing",
+];
+
+/**
+ * 待处理条数：侧边栏角标与页内文案共用这一份口径
+ *
+ * 口径 = 身份为 local 的技能数 + managed 且状态需要处理的技能数。
+ * 两处各写一份过滤条件必然分叉（#21 已统一过一次，又分叉过一次）。
+ */
+export function countPending(
+  items: MySkillItem[],
+  updates: UpdateCheckItem[],
+): number {
+  return items.filter((i) => {
+    if (i.identity === "local") return true;
+    if (i.identity !== "managed") return false;
+    // 按 (技能名, 工具) 取状态：同名技能可能装在多个工具下，状态各不相同
+    return placements(i).some((p) => {
+      const u = updates.find((x) => x.name === i.name && x.tool === p.tool);
+      return u ? PENDING_STATUSES.includes(u.status) : false;
+    });
+  }).length;
+}
+
+/** 需要警示的条数（冲突 + 本地缺失） */
+export function countAlerts(updates: UpdateCheckItem[]): number {
+  return updates.filter(
+    (u) => u.status === "conflict" || u.status === "localmissing",
+  ).length;
+}
+
 // ========== API ==========
 
 export const api = {

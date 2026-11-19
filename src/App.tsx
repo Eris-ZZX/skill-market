@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { api, AppSettings, ToolDetection, UpdateCheckItem } from "./api";
+import {
+  api,
+  AppSettings,
+  countAlerts,
+  countPending,
+  MySkillItem,
+  ToolDetection,
+  UpdateCheckItem,
+} from "./api";
 import MarketPage from "./pages/MarketPage";
 import InstalledPage from "./pages/InstalledPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -12,6 +20,8 @@ export default function App() {
   const [tools, setTools] = useState<ToolDetection[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [updates, setUpdates] = useState<UpdateCheckItem[]>([]);
+  // 侧边栏角标要和页内「N 项待处理」同口径，必须拿到同一份扫描结果
+  const [items, setItems] = useState<MySkillItem[]>([]);
   const [ready, setReady] = useState(false);
 
   // 首次加载：探测工具 + 读设置
@@ -41,17 +51,14 @@ export default function App() {
     });
   }, [ready, settings?.gitlabBaseUrl, settings?.gitlabProjectPath]);
 
-  const pendingCount = updates.filter(
-    (u) =>
-      u.status === "updateavailable" ||
-      u.status === "conflict" ||
-      u.status === "locallymodified" ||
-      u.status === "localmissing",
-  ).length;
-  // 本地缺失和冲突一样是「要人看一眼」的异常，一起触发警示色
-  const alertCount = updates.filter(
-    (u) => u.status === "conflict" || u.status === "localmissing",
-  ).length;
+  // 扫描结果由 App 持有：角标与页内计数必须基于同一份数据
+  useEffect(() => {
+    if (!ready) return;
+    api.scanSkills().then(setItems).catch(() => setItems([]));
+  }, [ready, tab]);
+
+  const pendingCount = countPending(items, updates);
+  const alertCount = countAlerts(updates);
 
   if (!ready || !settings) {
     return (
@@ -118,6 +125,8 @@ export default function App() {
             tools={tools}
             updates={updates}
             onRefreshUpdates={setUpdates}
+            items={items}
+            onItemsChange={setItems}
           />
         )}
         {tab === "publish" && (
