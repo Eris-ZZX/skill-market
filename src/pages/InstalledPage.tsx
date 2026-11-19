@@ -67,7 +67,10 @@ export default function InstalledPage({
       onRefreshUpdates(u);
       await load();
     } catch (e) {
-      setError(String(e));
+      // 上一次的蓝标必须清掉：留着旧结果等于告诉用户「刚检查过」，
+      // 而实际上这一轮什么都没查成
+      onRefreshUpdates([]);
+      setError(`无法连接远端仓库，当前状态未能刷新：${String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -115,7 +118,10 @@ export default function InstalledPage({
     const st = statusLabel(u.status);
     if (u.status === "uptodate")
       return <span className="page-sub">最新</span>;
-    const cls = u.status === "conflict" ? "badge warn" : "badge accent";
+    // 需处理和本地缺失都是「要人看一眼」的异常，用现有警示色；
+    // 可更新才是蓝色推进色
+    const warnish = u.status === "conflict" || u.status === "localmissing";
+    const cls = warnish ? "badge warn" : "badge accent";
     return <span className={cls}>{st.text}</span>;
   };
 

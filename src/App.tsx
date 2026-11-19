@@ -45,9 +45,13 @@ export default function App() {
     (u) =>
       u.status === "updateavailable" ||
       u.status === "conflict" ||
-      u.status === "locallymodified",
+      u.status === "locallymodified" ||
+      u.status === "localmissing",
   ).length;
-  const conflictCount = updates.filter((u) => u.status === "conflict").length;
+  // 本地缺失和冲突一样是「要人看一眼」的异常，一起触发警示色
+  const alertCount = updates.filter(
+    (u) => u.status === "conflict" || u.status === "localmissing",
+  ).length;
 
   if (!ready || !settings) {
     return (
@@ -78,7 +82,7 @@ export default function App() {
           >
             我的技能
             {pendingCount > 0 && (
-              <span className={`nav-badge ${conflictCount > 0 ? "warn" : ""}`}>
+              <span className={`nav-badge ${alertCount > 0 ? "warn" : ""}`}>
                 {pendingCount}
               </span>
             )}

@@ -3,7 +3,7 @@
 //! 前端只能通过这里的命令访问后端能力。
 //! 所有命令返回 `Result<T, String>`，错误直接展示给用户。
 
-use crate::state::{InstalledSkill, UpdateStatus};
+use crate::state::{judge_record, InstalledSkill, UpdateStatus};
 use crate::storage::{AppSettings, PersistedState};
 use crate::tools::{self, ToolDetection, ToolKind};
 use serde::Serialize;
@@ -180,46 +180,61 @@ pub struct UpdateCheckItem {
     pub remote_version: Option<String>,
 }
 
+/// 在远端索引里找与某条安装记录对应的技能
+///
+/// 必须同时比对 `name` 与 `repo_path`：同名技能可能同时存在于
+/// `skills/通用/x` 和 `skills/研发/x`，只按 name 匹配会把两者哈希串掉。
+///
+/// `repo_path` 为 None 表示本地导入，没有远端对应物。
+pub fn find_remote<'a>(
+    name: &str,
+    repo_path: Option<&str>,
+    remote: &'a [RemoteSkillView],
+) -> Option<&'a RemoteSkillView> {
+    let repo_path = repo_path?;
+    remote
+        .iter()
+        .find(|r| r.name == name && r.repo_path == repo_path)
+}
+
 /// 检查所有已装技能的更新状态
+///
+/// 配置缺失和网络失败都返回 Err：把「连不上」伪装成「远端已删除」
+/// 会把人引向保留本地版本，这比直接报错更危险。
 #[tauri::command]
 pub async fn check_updates(state: State<'_, AppState>) -> Result<Vec<UpdateCheckItem>, String> {
     let cfg = {
         let guard = lock(&state)?;
-        build_gitlab_config(&guard.settings).ok()
+        build_gitlab_config(&guard.settings)?
     };
 
-    let remote = if let Some(cfg) = cfg {
-        crate::commands::market::fetch_index(cfg).await.ok()
-    } else {
-        None
-    };
+    let remote = crate::commands::market::fetch_index(cfg)
+        .await
+        .map_err(|e| format!("无法获取远端技能索引：{e}"))?;
 
     let guard = lock(&state)?;
     let mut out = Vec::new();
     for rec in &guard.installs {
-        let kind = ToolKind::from_key(&rec.tool);
-        let local = kind
-            .and_then(|k| crate::install::local_hash(k, &rec.target_path).ok())
-            .unwrap_or_else(|| rec.installed_hash.clone());
+        // 读不到就如实传 None，绝不回退到安装时的旧指纹——
+        // 否则目录被删或被占用会被误判成「本地没改」，更新时可能覆盖用户手改
+        let local = ToolKind::from_key(&rec.tool)
+            .and_then(|k| crate::install::local_hash(k, &rec.target_path).ok());
 
-        let remote_hash = remote
-            .as_ref()
-            .and_then(|list| list.iter().find(|r| r.name == rec.name))
-            .map(|r| r.hash.clone());
+        let hit = find_remote(&rec.name, rec.source.repo_path.as_deref(), &remote);
+        let remote_hash = hit.map(|r| r.hash.clone());
+        let remote_version = hit.and_then(|r| r.version.clone());
 
-        let remote_version = remote
-            .as_ref()
-            .and_then(|list| list.iter().find(|r| r.name == rec.name))
-            .and_then(|r| r.version.clone());
+        // 本地导入的技能没有远端可比，不参与远端缺失判定
+        let status = if rec.source.repo_path.is_none() {
+            UpdateStatus::UpToDate
+        } else {
+            judge_record(&rec.installed_hash, local.as_deref(), remote_hash.as_deref())
+        };
 
         out.push(UpdateCheckItem {
             name: rec.name.clone(),
             tool: rec.tool.clone(),
-            status: UpdateStatus::judge(
-                &rec.installed_hash,
-                &local,
-                remote_hash.as_deref(),
-            ),
+            status,
             installed_version: rec.installed_version.clone(),
             remote_version,
         });

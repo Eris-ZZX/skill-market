@@ -79,6 +79,8 @@ pub enum UpdateStatus {
     Conflict,
     /// 远端技能已删除
     RemoteMissing,
+    /// 本地目录读不到（被删、被占用、无权限）
+    LocalMissing,
 }
 
 impl UpdateStatus {
@@ -117,6 +119,24 @@ impl UpdateStatus {
     pub fn needs_attention(&self) -> bool {
         !matches!(self, UpdateStatus::UpToDate)
     }
+}
+
+/// 判定一条安装记录的状态
+///
+/// `local_hash` 为 None 表示本地目录读不到（被删、被占用、无权限），
+/// `remote_hash` 为 None 表示远端没有同路径的技能。
+///
+/// 两个 None 必须区分开：把「读不到」当成「没改过」会让更新覆盖用户的手改，
+/// 把「连不上」当成「远端没了」会把用户引向保留本地版本。
+pub fn judge_record(
+    installed_hash: &str,
+    local_hash: Option<&str>,
+    remote_hash: Option<&str>,
+) -> UpdateStatus {
+    let Some(local_hash) = local_hash else {
+        return UpdateStatus::LocalMissing;
+    };
+    UpdateStatus::judge(installed_hash, local_hash, remote_hash)
 }
 
 /// 冲突时用户的选择
@@ -180,5 +200,53 @@ mod tests {
         assert!(!UpdateStatus::UpToDate.needs_attention());
         assert!(UpdateStatus::UpdateAvailable.needs_attention());
         assert!(UpdateStatus::Conflict.needs_attention());
+        assert!(UpdateStatus::LocalMissing.needs_attention());
+    }
+
+    #[test]
+    fn local_missing_wins_regardless_of_remote() {
+        // 读不到本地目录时，远端有没有、变没变都不该改变这个结论
+        assert_eq!(
+            judge_record("h1", None, Some("h1")),
+            UpdateStatus::LocalMissing
+        );
+        assert_eq!(
+            judge_record("h1", None, Some("h2")),
+            UpdateStatus::LocalMissing
+        );
+        assert_eq!(judge_record("h1", None, None), UpdateStatus::LocalMissing);
+    }
+
+    #[test]
+    fn local_present_remote_missing_is_remote_missing() {
+        assert_eq!(
+            judge_record("h1", Some("h1"), None),
+            UpdateStatus::RemoteMissing
+        );
+        // 本地改过且远端没了，沿用原 judge 的取舍：保留本地
+        assert_eq!(
+            judge_record("h1", Some("h1local"), None),
+            UpdateStatus::LocallyModified
+        );
+    }
+
+    #[test]
+    fn judge_record_covers_four_states() {
+        assert_eq!(
+            judge_record("h1", Some("h1"), Some("h1")),
+            UpdateStatus::UpToDate
+        );
+        assert_eq!(
+            judge_record("h1", Some("h1"), Some("h2")),
+            UpdateStatus::UpdateAvailable
+        );
+        assert_eq!(
+            judge_record("h1", Some("h1local"), Some("h1")),
+            UpdateStatus::LocallyModified
+        );
+        assert_eq!(
+            judge_record("h1", Some("h1local"), Some("h2")),
+            UpdateStatus::Conflict
+        );
     }
 }

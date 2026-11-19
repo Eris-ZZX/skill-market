@@ -54,7 +54,8 @@ export type UpdateStatus =
   | "updateavailable"
   | "locallymodified"
   | "conflict"
-  | "remotemissing";
+  | "remotemissing"
+  | "localmissing";
 
 export interface UpdateCheckItem {
   name: string;
@@ -159,6 +160,8 @@ export function statusLabel(s: UpdateStatus): { text: string; color: string } {
       return { text: "需处理", color: "#d97706" };
     case "remotemissing":
       return { text: "远端已删除", color: "#9aa4b2" };
+    case "localmissing":
+      return { text: "本地缺失", color: "#dc2626" };
   }
 }
 
