@@ -336,10 +336,15 @@ pub async fn install_skill(
     repo_path: String,
     tools: Vec<String>,
     allow_create_skills_dir: bool,
+    mode: Option<InstallMode>,
 ) -> Result<Vec<InstalledSkill>, String> {
-    let cfg = {
+    let (cfg, chosen) = {
         let guard = lock(&state)?;
-        build_gitlab_config(&guard.settings)?
+        (
+            build_gitlab_config(&guard.settings)?,
+            // 未显式指定时用设置里的默认方式——这个字段过去一直是死字段
+            mode.unwrap_or(guard.settings.default_install_mode),
+        )
     };
 
     let installed = crate::commands::market::install_from_repo(
@@ -347,6 +352,7 @@ pub async fn install_skill(
         &name,
         &repo_path,
         &tools,
+        chosen,
         allow_create_skills_dir,
     )
     .await

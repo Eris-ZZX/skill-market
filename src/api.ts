@@ -16,7 +16,7 @@ export interface AppSettings {
   gitlabProjectPath: string;
   gitlabToken: string | null;
   gitlabBranch: string;
-  defaultInstallMode: "copy" | "junction";
+  defaultInstallMode: "copy" | "junction" | "symlink" | "auto";
   /** 发布时的署名（姓名/工号）。内置 Token 下这是唯一的身份来源。 */
   publisherIdentity: string;
 }
@@ -32,11 +32,21 @@ export interface RemoteSkill {
   lastCommitAt: string | null;
 }
 
+/** 安装方式：链接只存一份，复制各存一份 */
+export type InstallMode = "copy" | "junction" | "symlink" | "auto";
+
+export const INSTALL_MODE_LABEL: Record<InstallMode, string> = {
+  junction: "链接",
+  symlink: "软链",
+  copy: "复制",
+  auto: "自动",
+};
+
 export interface InstalledSkill {
   name: string;
   tool: string;
   targetPath: string;
-  mode: "copy" | "junction";
+  mode: "copy" | "junction" | "symlink" | "auto";
   installedHash: string;
   installedVersion: string | null;
   source: {
@@ -212,6 +222,7 @@ export const api = {
     repoPath: string;
     tools: string[];
     allowCreateSkillsDir: boolean;
+    mode?: InstallMode;
   }) => invoke<InstalledSkill[]>("install_skill", args),
   uninstallSkill: (name: string, tool: string) =>
     invoke<void>("uninstall_skill", { name, tool }),
