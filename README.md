@@ -169,7 +169,7 @@ rustls::crypto::ring::default_provider().install_default();
 
 ### 环境要求
 
-- Rust 1.85+
+- Rust 1.90+
 - Node.js 22+
 - pnpm 10+
 - Windows 10+（macOS / Linux 未测试）
