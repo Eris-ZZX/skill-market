@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
-  formatTime,
-  InstalledSkill,
+  MySkillItem,
   statusLabel,
   ToolDetection,
   UpdateCheckItem,
@@ -17,12 +16,20 @@ interface Props {
 
 type View = "bySkill" | "byTool";
 
+const IDENTITY_LABEL: Record<string, string> = {
+  managed: "本工具管理",
+  external: "外部管理",
+  local: "本地已有",
+};
+
 export default function InstalledPage({
   tools,
   updates,
   onRefreshUpdates,
 }: Props) {
-  const [items, setItems] = useState<InstalledSkill[]>([]);
+  // 数据源是磁盘扫描，state.json 只补充来源信息
+  const [items, setItems] = useState<MySkillItem[]>([]);
+  const [health, setHealth] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>("bySkill");
@@ -34,8 +41,7 @@ export default function InstalledPage({
   const load = async () => {
     setLoading(true);
     try {
-      const list = await api.listInstalled();
-      setItems(list);
+      setItems(await api.scanSkills());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -45,6 +51,7 @@ export default function InstalledPage({
 
   useEffect(() => {
     void load();
+    api.stateHealth().then(setHealth).catch(() => setHealth(null));
   }, []);
 
   const uninstall = async (name: string, tool: string) => {
@@ -54,6 +61,15 @@ export default function InstalledPage({
       await load();
       const u = await api.checkUpdates().catch(() => []);
       onRefreshUpdates(u);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const adopt = async (name: string, tool: string, targetPath: string) => {
+    try {
+      await api.adoptSkill({ name, tool, targetPath });
+      await load();
     } catch (e) {
       setError(String(e));
     }
@@ -85,50 +101,47 @@ export default function InstalledPage({
     return items.filter(
       (i) =>
         i.name.toLowerCase().includes(q) ||
-        toolLabel(i.tool, tools).toLowerCase().includes(q) ||
-        (i.source.repoPath ?? "").toLowerCase().includes(q),
+        i.description.toLowerCase().includes(q) ||
+        i.tools.some((t) => toolLabel(t, tools).toLowerCase().includes(q)),
     );
   }, [items, query, tools]);
 
-  // 按技能聚合
-  const bySkill = useMemo(() => {
-    const map = new Map<string, InstalledSkill[]>();
-    filtered.forEach((i) => {
-      const arr = map.get(i.name) ?? [];
-      arr.push(i);
-      map.set(i.name, arr);
-    });
-    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filtered]);
-
-  // 按工具聚合
   const byTool = useMemo(() => {
-    const map = new Map<string, InstalledSkill[]>();
+    const map = new Map<string, MySkillItem[]>();
     filtered.forEach((i) => {
-      const arr = map.get(i.tool) ?? [];
-      arr.push(i);
-      map.set(i.tool, arr);
+      i.tools.forEach((t) => {
+        const arr = map.get(t) ?? [];
+        arr.push(i);
+        map.set(t, arr);
+      });
     });
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [filtered]);
 
-  const statusBadge = (name: string, tool: string) => {
-    const u = updateOf(name, tool);
+  // 顶部计数沿用「需要人处理」的口径
+  const pendingCount = items.filter(
+    (i) => i.identity === "local" || i.status === "updateavailable" || i.status === "conflict",
+  ).length;
+
+  const statusBadge = (item: MySkillItem) => {
+    if (item.identity === "external")
+      return <span className="badge">{IDENTITY_LABEL.external}</span>;
+    if (item.identity === "local")
+      return <span className="badge">{IDENTITY_LABEL.local}</span>;
+
+    // managed：状态来自 check_updates，未检查时如实说「未检查」
+    const u = item.tools
+      .map((t) => updateOf(item.name, t))
+      .find((x) => x !== undefined);
     if (!u) return <span className="page-sub">未检查</span>;
+    if (u.status === "uptodate") return <span className="page-sub">最新</span>;
     const st = statusLabel(u.status);
-    if (u.status === "uptodate")
-      return <span className="page-sub">最新</span>;
     // 需处理和本地缺失都是「要人看一眼」的异常，用现有警示色；
     // 可更新才是蓝色推进色
     const warnish = u.status === "conflict" || u.status === "localmissing";
     const cls = warnish ? "badge warn" : "badge accent";
     return <span className={cls}>{st.text}</span>;
   };
-
-  const pendingCount = items.filter((i) => {
-    const u = updateOf(i.name, i.tool);
-    return u && u.status !== "uptodate" && u.status !== "remotemissing";
-  }).length;
 
   if (loading && items.length === 0) {
     return (
@@ -146,7 +159,7 @@ export default function InstalledPage({
       <div className="page-head">
         <h1 className="page-title">我的技能</h1>
         <span className="page-sub">
-          {items.length} 条安装记录
+          {items.length} 个技能
           {pendingCount > 0 && ` · ${pendingCount} 项待处理`}
         </span>
         <div className="spacer" />
@@ -156,11 +169,12 @@ export default function InstalledPage({
         </button>
       </div>
 
+      {health && <div className="banner warn">{health}</div>}
       {error && <div className="banner error">{error}</div>}
 
       {items.length === 0 ? (
         <div className="empty">
-          <div className="empty-title">还没有安装任何技能</div>
+          <div className="empty-title">本机还没有任何技能</div>
           <div className="empty-hint">
             到「技能市场」挑一个技能，选择目标工具后安装。
           </div>
@@ -170,7 +184,7 @@ export default function InstalledPage({
           <div className="toolbar">
             <input
               className="search"
-              placeholder="搜索技能名、工具、来源…"
+              placeholder="搜索技能名、描述、工具…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -198,44 +212,65 @@ export default function InstalledPage({
                 <tr>
                   <th>技能</th>
                   <th>已装工具</th>
-                  <th>来源</th>
-                  <th>安装时间</th>
-                  <th style={{ width: 70 }}></th>
+                  <th>身份</th>
+                  <th>版本</th>
+                  <th style={{ width: 150 }}></th>
                 </tr>
               </thead>
               <tbody>
-                {bySkill.map(([name, recs]) => (
-                  <tr key={name}>
-                    <td style={{ fontWeight: 500 }}>{name}</td>
-                    <td>
-                      <div className="card-meta">
-                        {recs.map((r) => (
-                          <span
-                            key={r.tool}
-                            className="badge tool-chip"
-                            title={`${toolLabel(r.tool, tools)} · ${statusLabel(updateOf(name, r.tool)?.status ?? "uptodate").text}`}
+                {filtered.map((item) => {
+                  // 「本地已有」才提供纳入入口；external 一律不动
+                  const adoptable =
+                    item.identity === "local" && item.tools.length === 1;
+                  return (
+                    <tr key={item.name}>
+                      <td style={{ fontWeight: 500 }}>
+                        {item.name}
+                        {item.description && (
+                          <div className="page-sub">{item.description}</div>
+                        )}
+                      </td>
+                      <td>
+                        <div className="card-meta">
+                          {item.tools.map((t) => (
+                            <span key={t} className="badge tool-chip">
+                              {toolLabel(t, tools)}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td>{statusBadge(item)}</td>
+                      <td>{item.installedVersion ?? item.version ?? "—"}</td>
+                      <td>
+                        {adoptable ? (
+                          <button
+                            className="primary sm"
+                            onClick={() =>
+                              adopt(item.name, item.tools[0], item.targetPaths[0])
+                            }
                           >
-                            {toolLabel(r.tool, tools)}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="mono">
-                      {recs[0].source.repoPath ?? "本地"}
-                    </td>
-                    <td className="page-sub">
-                      {formatTime(Math.max(...recs.map((r) => r.installedAt)))}
-                    </td>
-                    <td>
-                      <button
-                        className="danger sm"
-                        onClick={() => setConfirmUninstall(recs[0])}
-                      >
-                        卸载
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                            纳入管理
+                          </button>
+                        ) : (
+                          item.identity === "managed" &&
+                          item.tools.length === 1 && (
+                            <button
+                              className="danger sm"
+                              onClick={() =>
+                                setConfirmUninstall({
+                                  name: item.name,
+                                  tool: item.tools[0],
+                                })
+                              }
+                            >
+                              卸载
+                            </button>
+                          )
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           ) : (
@@ -259,9 +294,8 @@ export default function InstalledPage({
                     <tr>
                       <th>技能</th>
                       <th>版本</th>
-                      <th>状态</th>
-                      <th>安装时间</th>
-                      <th style={{ width: 70 }}></th>
+                      <th>身份</th>
+                      <th style={{ width: 150 }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -269,22 +303,37 @@ export default function InstalledPage({
                       <tr key={it.name}>
                         <td>
                           <div style={{ fontWeight: 500 }}>{it.name}</div>
-                          <div className="mono">
-                            {it.source.repoPath ?? "本地"}
-                          </div>
+                          {it.description && (
+                            <div className="page-sub">{it.description}</div>
+                          )}
                         </td>
-                        <td>{it.installedVersion ?? "—"}</td>
-                        <td>{statusBadge(it.name, it.tool)}</td>
-                        <td className="page-sub">
-                          {formatTime(it.installedAt)}
-                        </td>
+                        <td>{it.installedVersion ?? it.version ?? "—"}</td>
+                        <td>{statusBadge(it)}</td>
                         <td>
-                          <button
-                            className="danger sm"
-                            onClick={() => setConfirmUninstall(it)}
-                          >
-                            卸载
-                          </button>
+                          {it.identity === "local" ? (
+                            <button
+                              className="primary sm"
+                              onClick={() =>
+                                adopt(
+                                  it.name,
+                                  tool,
+                                  it.targetPaths[it.tools.indexOf(tool)] ??
+                                    it.targetPaths[0],
+                                )
+                              }
+                            >
+                              纳入管理
+                            </button>
+                          ) : it.identity === "managed" ? (
+                            <button
+                              className="danger sm"
+                              onClick={() =>
+                                setConfirmUninstall({ name: it.name, tool })
+                              }
+                            >
+                              卸载
+                            </button>
+                          ) : null}
                         </td>
                       </tr>
                     ))}
@@ -312,10 +361,7 @@ export default function InstalledPage({
                 <br />
                 目标目录里的文件会被删除。
                 {(() => {
-                  const u = updateOf(
-                    confirmUninstall.name,
-                    confirmUninstall.tool,
-                  );
+                  const u = updateOf(confirmUninstall.name, confirmUninstall.tool);
                   return u?.status === "locallymodified" ||
                     u?.status === "conflict" ? (
                     <>

@@ -106,6 +106,34 @@ export interface Snapshot {
   dir: string;
 }
 
+/** 扫描到的一个技能（不是安装记录） */
+export interface ScannedSkill {
+  name: string;
+  dirName: string;
+  tool: string;
+  targetPath: string;
+  description: string;
+  version: string | null;
+  tags: string[];
+  category: string | null;
+  isLink: boolean;
+  linkTarget: string | null;
+}
+
+/** 「我的技能」的一行（按技能名聚合） */
+export interface MySkillItem {
+  name: string;
+  tools: string[];
+  targetPaths: string[];
+  description: string;
+  version: string | null;
+  /** managed | external | local */
+  identity: "managed" | "external" | "local";
+  /** 仅 managed 有值 */
+  status: UpdateStatus | null;
+  installedVersion: string | null;
+}
+
 // ========== API ==========
 
 export const api = {
@@ -120,6 +148,10 @@ export const api = {
   listRemoteSkills: () => invoke<RemoteSkill[]>("list_remote_skills"),
 
   listInstalled: () => invoke<InstalledSkill[]>("list_installed"),
+  scanSkills: () => invoke<MySkillItem[]>("scan_skills"),
+  adoptSkill: (args: { name: string; tool: string; targetPath: string }) =>
+    invoke<InstalledSkill>("adopt_skill", args),
+  stateHealth: () => invoke<string | null>("state_health"),
   installSkill: (args: {
     name: string;
     repoPath: string;

@@ -116,6 +116,27 @@ impl ToolKind {
     }
 }
 
+/// 该路径是否为软链或 Windows 重解析点
+///
+/// 扫描要据此区分「外部管理」：cc-switch 用 SymbolicLink 把同一份技能
+/// 链到多个工具目录，这类条目本客户端不应纳入、修改或删除。
+pub fn is_link(p: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 /// 单个工具的探测结果
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
