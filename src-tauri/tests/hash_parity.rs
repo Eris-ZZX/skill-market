@@ -18,15 +18,14 @@ fn write(dir: &Path, rel: &str, content: &str) {
     fs::write(p, content.as_bytes()).unwrap();
 }
 
-/// 模拟远端索引路径：遍历目录收集文件，排除规则与 `parse_repo_zip` 一致，
-/// 然后交给 `hash_files`。
+/// 模拟远端索引路径：先收集全部文件，再对**完整相对路径**调 `should_skip`
+///
+/// 必须复现 `parse_repo_zip` 的调用形态——它拿到的是归档里
+/// `skills/x/.hidden/y` 这样的多段相对路径，而不是单段文件名。
+/// 收集阶段刻意不做剪枝，否则 `should_skip` 的分段判定出错时测试也发现不了。
 fn remote_hash(dir: &Path) -> String {
     fn walk(base: &Path, cur: &Path, out: &mut Vec<(String, Vec<u8>)>) {
         for entry in fs::read_dir(cur).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if hash::should_skip(&name) {
-                continue;
-            }
             let path = entry.path();
             if path.is_dir() {
                 walk(base, &path, out);
@@ -40,8 +39,12 @@ fn remote_hash(dir: &Path) -> String {
             }
         }
     }
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    walk(dir, dir, &mut files);
+    let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+    walk(dir, dir, &mut all);
+    let files: Vec<(String, Vec<u8>)> = all
+        .into_iter()
+        .filter(|(rel, _)| !hash::should_skip(rel))
+        .collect();
     hash::hash_files(&files).unwrap()
 }
 
@@ -238,4 +241,73 @@ fn 临时目录本身不作为相对路径的一部分() {
         assert_parity("目录 A", a.path()),
         assert_parity("目录 B", b.path())
     );
+}
+
+#[test]
+fn 嵌套隐藏目录被排除() {
+    // 远端拿到的是 `.hidden/x` 这样的多段路径，只看最后一段会漏掉
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
+    write(d.path(), ".hidden/x", "junk");
+    write(d.path(), ".git/config", "junk");
+    let with_hidden = assert_parity("含嵌套隐藏目录", d.path());
+
+    let clean = tempfile::tempdir().unwrap();
+    write(clean.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
+    let without_hidden = assert_parity("无嵌套隐藏目录", clean.path());
+
+    assert_eq!(
+        with_hidden, without_hidden,
+        "嵌套隐藏目录里的文件不应进入指纹"
+    );
+}
+
+#[test]
+fn 嵌套_pycache_目录被排除() {
+    // 关键：`a.py` 不是 .pyc，只能靠 `__pycache__` 这一段识别
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
+    write(d.path(), "scripts/__pycache__/a.py", "junk");
+    let with_pycache = assert_parity("含嵌套 __pycache__", d.path());
+
+    let clean = tempfile::tempdir().unwrap();
+    write(clean.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
+    write(clean.path(), "scripts/run.py", "print(1)\n");
+    let without_pycache = assert_parity("无嵌套 __pycache__", clean.path());
+
+    assert_ne!(
+        with_pycache, without_pycache,
+        "对照组的 scripts/run.py 是正常文件，指纹本应不同"
+    );
+
+    // 真正要断言的：垃圾文件被排除后，与只有 SKILL.md 的目录一致
+    let only_skill = tempfile::tempdir().unwrap();
+    write(only_skill.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
+    assert_eq!(
+        with_pycache,
+        assert_parity("只有 SKILL.md", only_skill.path()),
+        "`__pycache__` 段本身必须被识别，即使里面的文件不是 .pyc"
+    );
+}
+
+#[test]
+fn should_skip_对多段路径判定正确() {
+    // 单段（目录遍历）与多段（远端归档解析）两种形态都必须判对
+    let cases: &[(&str, bool)] = &[
+        (".DS_Store", true),
+        ("__pycache__", true),
+        ("run.pyc", true),
+        (".hidden/x", true),
+        (".git/config", true),
+        ("scripts/__pycache__/a.py", true),
+        ("scripts/run.py", false),
+        ("skills/通用/grill-me/SKILL.md", false),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            hash::should_skip(input),
+            *expected,
+            "should_skip({input:?}) 应为 {expected}"
+        );
+    }
 }

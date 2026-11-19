@@ -72,12 +72,15 @@ pub fn hash_dir_strict(dir: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// 排除判定：隐藏项、`__pycache__`、`*.pyc` 一律不进指纹
+/// 排除判定：任一路径分段是隐藏项或 `__pycache__`，或文件名以 `.pyc` 结尾
 ///
-/// 远端索引和本地目录共用这一份，避免两边规则各自演化后漂移。
+/// 入参可以是单段文件名（目录遍历时）或完整相对路径（远端归档解析时），
+/// 两种形态都必须判对：只看最后一段会让 `.hidden/x` 这类深层隐藏文件漏过。
 pub fn should_skip(name: &str) -> bool {
     let leaf = name.rsplit('/').next().unwrap_or(name);
-    leaf.starts_with('.') || leaf == "__pycache__" || leaf.ends_with(".pyc")
+    name.split('/')
+        .any(|seg| seg.starts_with('.') || seg == "__pycache__")
+        || leaf.ends_with(".pyc")
 }
 
 /// 对内存中的文件集合算指纹
