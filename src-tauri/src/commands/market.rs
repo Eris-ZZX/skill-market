@@ -10,6 +10,7 @@
 
 use crate::frontmatter::SkillMeta;
 use crate::gitlab::{GitLabClient, GitLabConfig};
+use crate::hash;
 use crate::install;
 use crate::state::{InstallMode, InstalledSkill, SkillSource, SourceKind};
 use crate::tools::ToolKind;
@@ -151,11 +152,7 @@ fn parse_repo_zip(bytes: &[u8]) -> Result<Vec<RemoteSkillView>> {
             if rel.is_empty() || entry.is_dir() {
                 continue;
             }
-            // 与 hash::hash_dir 的排除规则保持一致
-            if rel.split('/').any(|seg| seg.starts_with('.') || seg == "__pycache__") {
-                continue;
-            }
-            if rel.ends_with(".pyc") {
+            if hash::should_skip(rel) {
                 continue;
             }
             let mut buf = Vec::new();
@@ -175,7 +172,7 @@ fn parse_repo_zip(bytes: &[u8]) -> Result<Vec<RemoteSkillView>> {
             None => continue,
         };
 
-        let hash = hash_from_files(&hasher_files, meta.name.clone())?;
+        let hash = hash::hash_files(&hasher_files)?;
 
         out.push(RemoteSkillView {
             name: meta.name,
@@ -203,133 +200,6 @@ fn strip_archive_root(p: &str) -> String {
         Some((_, rest)) => rest.to_string(),
         None => String::new(),
     }
-}
-
-/// 对内存中的文件集合算哈希
-///
-/// 必须与 `hash::hash_dir` 的算法完全一致，否则本地算出来的
-/// 和远端对不上，会全员误报「有更新」。
-fn hash_from_files(files: &[(String, Vec<u8>)], _name: String) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let mut sorted: Vec<_> = files.to_vec();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = Sha256::new();
-    for (rel, bytes) in sorted {
-        hasher.update(rel.as_bytes());
-        hasher.update(b"\0");
-        let normalized = if rel.eq_ignore_ascii_case("SKILL.md") {
-            // 与本地 hash 保持相同的 frontmatter 规范化
-            match String::from_utf8(bytes.clone()) {
-                Ok(s) => normalize_md(&s).into_bytes(),
-                Err(_) => normalize_newlines(&bytes),
-            }
-        } else {
-            normalize_newlines(&bytes)
-        };
-        hasher.update(&normalized);
-        hasher.update(b"\0");
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn normalize_newlines(b: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\r' {
-            out.push(b'\n');
-            if i + 1 < b.len() && b[i + 1] == b'\n' {
-                i += 2;
-                continue;
-            }
-            i += 1;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
-/// frontmatter 规范化（与 hash 模块保持一致）
-fn normalize_md(raw: &str) -> String {
-    // 复用 hash 模块的逻辑：这里简化实现，剥离易变字段并按 key 排序
-    // 完整实现见 hash::normalized_skill_md（该函数为私有，这里做等价处理）
-    let text = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    if !text.starts_with("---") {
-        return text;
-    }
-    let after = &text[3..];
-    let Some(close) = after.find("\n---") else {
-        return text;
-    };
-    let fm = &after[..close];
-    let body = &after[close + 4..];
-
-    const VOLATILE: &[&str] = &[
-        "enabled_at",
-        "enabled_at_ms",
-        "installed_at",
-        "enabled",
-        "last_opened_at",
-        "last_used_at",
-        "cli_version",
-        "updated_at",
-    ];
-
-    let mut kept: Vec<String> = Vec::new();
-    let mut skip = false;
-    for line in fm.lines() {
-        let cont = line.starts_with(' ') || line.starts_with('\t');
-        if skip && cont {
-            continue;
-        }
-        skip = false;
-        if !cont {
-            if let Some((k, _)) = line.trim_start().split_once(':') {
-                if VOLATILE.contains(&k.trim()) {
-                    skip = true;
-                    continue;
-                }
-            }
-        }
-        kept.push(line.to_string());
-    }
-
-    // 按顶层 key 排序
-    let mut blocks: Vec<(String, Vec<String>)> = Vec::new();
-    let mut cur: Option<(String, Vec<String>)> = None;
-    for line in kept {
-        let cont = line.starts_with(' ') || line.starts_with('\t') || line.starts_with('-');
-        if cont {
-            if let Some((_, v)) = cur.as_mut() {
-                v.push(line);
-                continue;
-            }
-            blocks.push((line.clone(), vec![]));
-            continue;
-        }
-        let key = line
-            .split_once(':')
-            .map(|(k, _)| k.trim().to_string())
-            .unwrap_or_else(|| line.clone());
-        if let Some(done) = cur.take() {
-            blocks.push(done);
-        }
-        cur = Some((key, vec![line]));
-    }
-    if let Some(done) = cur {
-        blocks.push(done);
-    }
-    blocks.sort_by(|a, b| a.0.cmp(&b.0));
-    let sorted = blocks
-        .into_iter()
-        .flat_map(|(_, v)| v)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!("---\n{sorted}\n---\n{body}")
 }
 
 /// 从仓库安装一个技能到多个工具
@@ -454,8 +324,8 @@ mod tests {
             b"---\r\nname: x\r\n---\r\n".to_vec(),
         )];
         assert_eq!(
-            hash_from_files(&lf, "x".into()).unwrap(),
-            hash_from_files(&crlf, "x".into()).unwrap()
+            hash::hash_files(&lf).unwrap(),
+            hash::hash_files(&crlf).unwrap()
         );
     }
 
@@ -470,8 +340,8 @@ mod tests {
             b"---\nname: x\ndescription: d\nenabled_at: 123\n---\n".to_vec(),
         )];
         assert_eq!(
-            hash_from_files(&a, "x".into()).unwrap(),
-            hash_from_files(&b, "x".into()).unwrap()
+            hash::hash_files(&a).unwrap(),
+            hash::hash_files(&b).unwrap()
         );
     }
 }

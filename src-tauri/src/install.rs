@@ -48,7 +48,7 @@ pub fn install(
         ));
     }
 
-    let source_hash = hash::hash_dir(source_dir, tool.writes_volatile_fields())?;
+    let source_hash = hash::hash_dir(source_dir)?;
 
     match mode {
         InstallMode::Copy => {
@@ -66,7 +66,7 @@ pub fn install(
     }
 
     // 装完再算一次（copy 后内容应当一致；junction 会跟随源）
-    let installed_hash = hash::hash_dir(&target, tool.writes_volatile_fields())?;
+    let installed_hash = hash::hash_dir(&target)?;
     if installed_hash != source_hash {
         // 不致命，但记录差异以便排查
         log::warn!(
@@ -117,12 +117,13 @@ pub fn uninstall(tool: ToolKind, name: &str) -> Result<()> {
 }
 
 /// 计算某个已装技能的当前本地哈希
-pub fn local_hash(tool: ToolKind, target_path: &str) -> Result<String> {
+pub fn local_hash(_tool: ToolKind, target_path: &str) -> Result<String> {
     let p = Path::new(target_path);
     if !p.exists() {
         bail!("目标目录不存在: {target_path}");
     }
-    hash::hash_dir(p, tool.writes_volatile_fields())
+    // 指纹规则已与工具无关：所有工具的 SKILL.md 都走同一套规范化
+    hash::hash_dir(p)
 }
 
 /// 递归复制目录

@@ -14,39 +14,25 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 计算目录的内容哈希（更新检测用，宽松模式）
+/// 计算目录的内容哈希（更新检测用）
 ///
-/// 排除项：
-/// - 所有 `.` 开头的隐藏文件/目录
-/// - `__pycache__/` 和 `*.pyc`（Python 运行时生成）
-///
-/// `tools_that_rewrite_frontmatter` 为真时，会剥离 SKILL.md frontmatter
-/// 里的易变字段（千问办公会写 `enabled_at`，WorkBuddy 可能类似）。
-pub fn hash_dir(dir: &Path, strip_volatile: bool) -> anyhow::Result<String> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(dir, dir, &mut files)?;
-    files.sort();
+/// 排除项见 [`should_skip`]。
+pub fn hash_dir(dir: &Path) -> anyhow::Result<String> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    collect_files(dir, dir, &mut paths)?;
 
-    let mut hasher = Sha256::new();
-    for path in &files {
-        let rel = path.strip_prefix(dir).unwrap_or(path);
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        hasher.update(rel_str.as_bytes());
-        hasher.update(b"\0");
+    let files: Vec<(String, Vec<u8>)> = paths
+        .iter()
+        .map(|path| {
+            let rel = path.strip_prefix(dir).unwrap_or(path);
+            Ok((
+                rel.to_string_lossy().replace('\\', "/"),
+                fs::read(path)?,
+            ))
+        })
+        .collect::<anyhow::Result<_>>()?;
 
-        let bytes = if strip_volatile && rel_str.eq_ignore_ascii_case("SKILL.md") {
-            let raw = fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", path.display()))?;
-            normalized_skill_md(&raw).into_bytes()
-        } else {
-            normalize_bytes(&fs::read(path)?)
-        };
-
-        hasher.update(&bytes);
-        hasher.update(b"\0");
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
+    hash_files(&files)
 }
 
 /// 计算目录的部署完整性哈希（严格模式）
@@ -86,27 +72,67 @@ pub fn hash_dir_strict(dir: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// 递归收集用于更新检测的文件（排除隐藏项与 Python 字节码）
+/// 排除判定：任一路径分段是隐藏项或 `__pycache__`，或文件名以 `.pyc` 结尾
+///
+/// 入参可以是单段文件名（目录遍历时）或完整相对路径（远端归档解析时），
+/// 两种形态都必须判对：只看最后一段会让 `.hidden/x` 这类深层隐藏文件漏过。
+pub fn should_skip(name: &str) -> bool {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    name.split('/')
+        .any(|seg| seg.starts_with('.') || seg == "__pycache__")
+        || leaf.ends_with(".pyc")
+}
+
+/// 对内存中的文件集合算指纹
+///
+/// 本地目录和远端索引都走这里，两侧算法无法再各自漂移。
+/// `files` 的相对路径必须是 `/` 分隔、无前导 `./` 的形式。
+pub fn hash_files(files: &[(String, Vec<u8>)]) -> anyhow::Result<String> {
+    // 按字符串逐字节排序。不能用 PathBuf：它按路径分量比较，
+    // 会让 `a/b.md` 与 `a-x.md` 这类同一目录下两条路径的顺序反过来。
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, bytes) in sorted {
+        // 相对路径也参与哈希，否则改名检测不出来
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(normalize_file_bytes(rel, bytes));
+        hasher.update(b"\0");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// 单个文件在进指纹前的规范化
+///
+/// `SKILL.md` 走 frontmatter 规范化；其余文件只归一换行符。
+pub fn normalize_file_bytes(name: &str, bytes: &[u8]) -> Vec<u8> {
+    if name.rsplit('/').next().unwrap_or(name).eq_ignore_ascii_case("SKILL.md") {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => normalize_skill_md(s).into_bytes(),
+            // 非 UTF-8 的 SKILL.md 无法解析 frontmatter，至少保证换行符一致
+            Err(_) => normalize_bytes(bytes),
+        }
+    } else {
+        normalize_bytes(bytes)
+    }
+}
+
+/// 递归收集用于更新检测的文件（排除见 [`should_skip`]）
 fn collect_files(base: &Path, current: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // 隐藏文件/目录一律跳过（.git/.DS_Store/.claude 等）
-        if name.starts_with('.') {
+        if should_skip(&name) {
             continue;
         }
 
         let path = entry.path();
         if path.is_dir() {
-            if name == "__pycache__" {
-                continue;
-            }
             collect_files(base, &path, out)?;
         } else {
-            if name.ends_with(".pyc") {
-                continue;
-            }
             out.push(path);
         }
     }
@@ -150,7 +176,9 @@ fn normalize_bytes(bytes: &[u8]) -> Vec<u8> {
 ///
 /// 千问办公会在 SKILL.md 里写入 `enabled_at: <timestamp>`，
 /// 不剥离的话每跑一次技能 hash 就变，永远显示「已修改」。
-fn normalized_skill_md(raw: &str) -> String {
+///
+/// 远端索引和本地目录都必须走这里——两侧用不同规则算出的指纹永远对不上。
+pub fn normalize_skill_md(raw: &str) -> String {
     /// 工具运行时回写的字段，不代表技能内容变化
     const VOLATILE_KEYS: &[&str] = &[
         "enabled_at",
@@ -168,10 +196,12 @@ fn normalized_skill_md(raw: &str) -> String {
         return text.replace("\r\n", "\n");
     }
 
-    // 找 frontmatter 的结束分隔符
+    // 先归一换行符，否则 `lines()` 剥离前导分隔符的 `\r` 后会残留一个空行，
+    // 且 CRLF 文件里 frontmatter 末行会带着 `\r` 进入排序，两种换行算出不同指纹。
+    let text = text.replace("\r\n", "\n");
     let after_open = &text[3..];
     let Some(close_rel) = after_open.find("\n---") else {
-        return text.replace("\r\n", "\n");
+        return text;
     };
 
     let fm_end = 3 + close_rel;
@@ -205,7 +235,7 @@ fn normalized_skill_md(raw: &str) -> String {
     // 剩余顶层键按字典序排序（保持缩进块整体移动）
     let sorted = sort_frontmatter_blocks(&kept);
 
-    format!("---\n{}\n---\n{}", sorted, body.replace("\r\n", "\n"))
+    format!("---\n{sorted}\n---\n{body}")
 }
 
 /// 把 frontmatter 行按「顶层键 + 其续行」分块，块间按 key 排序
@@ -272,8 +302,8 @@ mod tests {
         write(a.path(), "SKILL.md", "---\nname: x\n---\nbody\n");
         write(b.path(), "SKILL.md", "---\r\nname: x\r\n---\r\nbody\r\n");
         assert_eq!(
-            hash_dir(a.path(), false).unwrap(),
-            hash_dir(b.path(), false).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -286,8 +316,8 @@ mod tests {
         write(b.path(), "__pycache__/mod.cpython-311.pyc", "garbage");
         write(b.path(), "run.pyc", "garbage");
         assert_eq!(
-            hash_dir(a.path(), false).unwrap(),
-            hash_dir(b.path(), false).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -299,8 +329,8 @@ mod tests {
         write(b.path(), "SKILL.md", "---\nname: x\n---\n");
         write(b.path(), ".DS_Store", "junk");
         assert_eq!(
-            hash_dir(a.path(), false).unwrap(),
-            hash_dir(b.path(), false).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -315,14 +345,9 @@ mod tests {
             "---\nname: x\ndescription: d\nenabled_at: 1787556778796\n---\nbody\n",
         );
         assert_eq!(
-            hash_dir(a.path(), true).unwrap(),
-            hash_dir(b.path(), true).unwrap(),
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap(),
             "enabled_at 不应影响哈希"
-        );
-        // 不开启剥离时应该不同
-        assert_ne!(
-            hash_dir(a.path(), false).unwrap(),
-            hash_dir(b.path(), false).unwrap()
         );
     }
 
@@ -333,8 +358,8 @@ mod tests {
         write(a.path(), "SKILL.md", "---\nname: x\ndescription: d\n---\nbody\n");
         write(b.path(), "SKILL.md", "---\ndescription: d\nname: x\n---\nbody\n");
         assert_eq!(
-            hash_dir(a.path(), true).unwrap(),
-            hash_dir(b.path(), true).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -345,8 +370,8 @@ mod tests {
         write(a.path(), "SKILL.md", "---\nname: x\n---\nbody A\n");
         write(b.path(), "SKILL.md", "---\nname: x\n---\nbody B\n");
         assert_ne!(
-            hash_dir(a.path(), true).unwrap(),
-            hash_dir(b.path(), true).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -357,8 +382,8 @@ mod tests {
         write(a.path(), "a.txt", "same");
         write(b.path(), "b.txt", "same");
         assert_ne!(
-            hash_dir(a.path(), true).unwrap(),
-            hash_dir(b.path(), true).unwrap()
+            hash_dir(a.path()).unwrap(),
+            hash_dir(b.path()).unwrap()
         );
     }
 
@@ -366,7 +391,7 @@ mod tests {
     fn missing_frontmatter_does_not_panic() {
         let a = tmpdir();
         write(a.path(), "SKILL.md", "# just markdown, no frontmatter\n");
-        assert!(hash_dir(a.path(), true).is_ok());
+        assert!(hash_dir(a.path()).is_ok());
     }
 
     #[test]

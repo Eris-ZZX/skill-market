@@ -92,8 +92,9 @@ impl ToolKind {
 
     /// 该工具是否会在 SKILL.md 里回写易变字段
     ///
-    /// 影响内容哈希的规范化：这些字段在计算 hash 前必须剥离，
-    /// 否则跑一次技能就会被误判为「本地已修改」。
+    /// **本函数不再影响内容哈希。** 哈希对所有工具都无条件剥离易变字段
+    /// （见 `hash::normalize_skill_md`），否则远端指纹与本地指纹对不上。
+    /// 保留它是因为它仍然是对工具行为的准确描述，可作展示或诊断用。
     pub fn writes_volatile_fields(&self) -> bool {
         matches!(self, ToolKind::QwenWork | ToolKind::WorkBuddy)
     }
