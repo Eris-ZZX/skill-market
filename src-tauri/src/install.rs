@@ -45,7 +45,7 @@ pub fn sanitize_install_name(raw: &str) -> Option<String> {
 }
 
 /// 要求传入的目录名本身就是合法值（不做规范化，避免静默改正）
-fn require_valid_directory(directory: &str) -> Result<String> {
+pub fn require_valid_directory(directory: &str) -> Result<String> {
     match sanitize_install_name(directory) {
         Some(n) if n == directory => Ok(n),
         _ => bail!("非法技能目录名（疑似路径穿越）: {directory:?}"),
@@ -100,8 +100,42 @@ pub fn deploy_to_paths(
             target: t.as_path(),
         })
         .collect();
-    let used = deploy_many(&ssot, &deployments, mode)?;
+    let used = deploy_many(&ssot, &deployments, mode, DeployPolicy::MustBeEmpty)?;
     Ok((ssot, used))
+}
+
+/// 更新一个已存在的技能：替换库内容，并按每条记录自己的 mode 处理工具目录
+///
+/// `targets` 是 `(工具目录里的落点, 该记录实际使用的 mode)`。链接模式的落点
+/// 不用重建（它跟着库走），只有 Copy 模式的独立副本需要替换。
+///
+/// 返回新的库路径。
+pub fn update_deploy(
+    source_dir: &Path,
+    library_root: &Path,
+    dir_name: &str,
+    targets: &[(PathBuf, InstallMode)],
+) -> Result<PathBuf> {
+    // 校验必须在这里做而不是只靠调用方：下面所有路径都用 dir_name 拼，
+    // 漏一次就是任意目录写入。
+    require_valid_directory(dir_name)?;
+
+    let ssot = prepare_library(source_dir, library_root, dir_name)?;
+
+    // 只有 copy 副本需要替换；链接会跟着库自动变
+    let deployments: Vec<Deployment> = targets
+        .iter()
+        .filter(|(_, m)| !matches!(m, InstallMode::Junction | InstallMode::Symlink))
+        .map(|(p, _)| Deployment {
+            tool: ToolKind::Cursor,
+            target: p.as_path(),
+        })
+        .collect();
+
+    if !deployments.is_empty() {
+        deploy_many(&ssot, &deployments, InstallMode::Copy, DeployPolicy::Replace)?;
+    }
+    Ok(ssot)
 }
 
 /// 创建目录软链；返回是否成功（测试用于探测环境）
@@ -214,7 +248,7 @@ pub fn install_many(
         })
         .collect();
 
-    let used = deploy_many(&ssot, &deployments, mode)?;
+    let used = deploy_many(&ssot, &deployments, mode, DeployPolicy::MustBeEmpty)?;
 
     let mut out = Vec::with_capacity(used.len());
     for (i, tool) in tools.iter().enumerate() {
@@ -274,11 +308,48 @@ fn prepare_library(source_dir: &Path, library_root: &Path, dir_name: &str) -> Re
     Ok(ssot)
 }
 
+/// 备份目录根：`<app_data>/backups`
+pub fn backups_root(app_data: &Path) -> PathBuf {
+    app_data.join("backups")
+}
+
+/// 把当前库内容备份到 `<root>/<YYYYMMDD_HHMMSS>_<name>/`，重名加 `_1` `_2`
+///
+/// 备份是兜底而非前置条件：失败只返回 Err 供调用方 warn，不中断更新。
+pub fn backup_library(library_root: &Path, name: &str, backups: &Path) -> Result<PathBuf> {
+    let ssot = library_root.join(name);
+    if !ssot.is_dir() {
+        bail!("技能库里没有 {name}，无需备份");
+    }
+    std::fs::create_dir_all(backups)?;
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let mut dest = backups.join(format!("{stamp}_{name}"));
+    let mut n = 1;
+    while dest.exists() {
+        dest = backups.join(format!("{stamp}_{name}_{n}"));
+        n += 1;
+    }
+    copy_dir_recursive(&ssot, &dest)?;
+    Ok(dest)
+}
+
 /// 一个已暂存、等待替换的目标
 struct Staged {
     target: std::path::PathBuf,
     staging: tempfile::TempDir,
     used: InstallMode,
+}
+
+/// 部署策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployPolicy {
+    /// 目标必须不存在（安装语义）
+    MustBeEmpty,
+    /// 允许替换已存在的目标（更新语义）
+    ///
+    /// 旧内容会被挪进暂存区的 `old/` 而不是删除：更新失败时得能还原，
+    /// 否则「更新失败 = 技能消失」比不能更新更糟。
+    Replace,
 }
 
 /// 多目标部署：先全部准备，再逐个替换，失败反向回滚
@@ -288,10 +359,12 @@ fn deploy_many(
     ssot: &Path,
     deployments: &[Deployment<'_>],
     mode: InstallMode,
+    policy: DeployPolicy,
 ) -> Result<Vec<InstallMode>> {
     let mut staged: Vec<Staged> = Vec::with_capacity(deployments.len());
     for d in deployments {
-        if d.target.exists() || is_link(d.target) {
+        let occupied = d.target.exists() || is_link(d.target);
+        if occupied && policy == DeployPolicy::MustBeEmpty {
             bail!(
                 "{} 下已存在同名技能 {}，请先卸载或改名",
                 d.tool.display_name(),
@@ -346,7 +419,29 @@ fn deploy_many(
     let mut changed = 0usize;
     for entry in &staged {
         let replacement = entry.staging.path().join("new");
+        let previous = entry.staging.path().join("old");
+
+        // Replace 策略下把旧内容挪进暂存区而不是删除，失败才好还原
+        let had_previous = if policy == DeployPolicy::Replace
+            && (entry.target.exists() || is_link(&entry.target))
+        {
+            if let Err(e) = std::fs::rename(&entry.target, &previous) {
+                rollback(&staged[..changed]);
+                return Err(anyhow::anyhow!(
+                    "移除旧版本 {} 失败: {e}",
+                    entry.target.display()
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
         if let Err(e) = std::fs::rename(&replacement, &entry.target) {
+            // 先把这个目标还原，再撤回前面已替换的
+            if had_previous {
+                let _ = std::fs::rename(&previous, &entry.target);
+            }
             rollback(&staged[..changed]);
             return Err(anyhow::anyhow!(
                 "部署到 {} 失败: {e}",
@@ -360,13 +455,14 @@ fn deploy_many(
 }
 
 /// 反向撤销已完成的替换
+///
+/// 暂存区里的 `old/` 是原内容，必须挪回去；直接删目标等于把技能弄丢。
 fn rollback(done: &[Staged]) {
     for entry in done.iter().rev() {
-        // 新装的是链接时 remove_dir 就够；是目录时 remove_dir_all 才能清干净
-        if is_link(&entry.target) {
-            let _ = std::fs::remove_dir(&entry.target);
-        } else {
-            let _ = std::fs::remove_dir_all(&entry.target);
+        let previous = entry.staging.path().join("old");
+        remove_installed(&entry.target).ok();
+        if previous.exists() || is_link(&previous) {
+            let _ = std::fs::rename(&previous, &entry.target);
         }
     }
 }
@@ -505,6 +601,73 @@ pub fn symlink_supported() -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// 直接构造「第一个已替换、第二个替换失败」的状态，验证回滚把旧内容挪回来
+    ///
+    /// 这里不能用 update_deploy：它一旦准备阶段失败就根本走不到回滚，
+    /// 测不到本票最关键的那条路径。
+    #[test]
+    fn rollback_把暂存区的旧内容还原回目标() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("skills").join("demo");
+        write_target(&target, "旧内容");
+
+        // 模拟替换完成：目标换成新内容，原内容被挪进 staging/old
+        let staging = tempfile::Builder::new()
+            .prefix(".skill-deploy-")
+            .tempdir_in(target.parent().unwrap())
+            .unwrap();
+        std::fs::rename(&target, staging.path().join("old")).unwrap();
+        write_target(&target, "新内容");
+
+        let staged = vec![Staged {
+            target: target.clone(),
+            staging,
+            used: InstallMode::Copy,
+        }];
+
+        rollback(&staged);
+
+        assert!(target.is_dir(), "目标必须被还原而不是删空");
+        let restored = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        assert!(
+            restored.contains("旧内容"),
+            "回滚要挪回暂存区的 old，不能只删新装的；实际: {restored}"
+        );
+        assert!(
+            !restored.contains("新内容"),
+            "回滚后不该留下新装的内容；实际: {restored}"
+        );
+    }
+
+    /// 原本就没有目标的回滚仍应保持「删掉新装的」行为
+    #[test]
+    fn rollback_对原本不存在目标时只删除() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("skills").join("demo");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        write_target(&target, "新装的内容");
+
+        let staging = tempfile::Builder::new()
+            .prefix(".skill-deploy-")
+            .tempdir_in(target.parent().unwrap())
+            .unwrap();
+        let staged = vec![Staged {
+            target: target.clone(),
+            staging,
+            used: InstallMode::Copy,
+        }];
+
+        rollback(&staged);
+        assert!(!target.exists(), "本来就没有的东西，回滚后也不该留下");
+    }
+
+    fn write_target(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("SKILL.md")).unwrap();
+        f.write_all(format!("---\nname: demo\n---\n{body}\n").as_bytes())
+            .unwrap();
+    }
 
     fn write(dir: &Path, rel: &str, content: &str) {
         let p = dir.join(rel);

@@ -227,6 +227,8 @@ export const api = {
   uninstallSkill: (name: string, tool: string) =>
     invoke<void>("uninstall_skill", { name, tool }),
   checkUpdates: () => invoke<UpdateCheckItem[]>("check_updates"),
+  updateSkill: (name: string, tool: string) =>
+    invoke<InstalledSkill>("update_skill", { name, tool }),
 
   // 发布 / 历史 / 回滚
   publishSkill: (req: PublishRequest) =>
