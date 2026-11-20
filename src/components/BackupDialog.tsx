@@ -35,6 +35,7 @@ export default function BackupDialog({ tools, onClose, onChanged }: Props) {
   const [list, setList] = useState<SkillBackupEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SkillBackupEntry | null>(
     null,
   );
@@ -56,10 +57,17 @@ export default function BackupDialog({ tools, onClose, onChanged }: Props) {
 
   const restore = async (b: SkillBackupEntry) => {
     setError(null);
+    setNotice(null);
     try {
-      await api.restoreSkillBackup(b.backupId);
+      const r = await api.restoreSkillBackup(b.backupId);
       onChanged();
       await load();
+      const tool = toolLabel(b.tool, tools);
+      setNotice(
+        r.pendingTool
+          ? `已恢复到本地库，但 ${tool} 未安装。装好之后再点「检查并修复」即可链过去。`
+          : `已恢复到本地库。点「检查并修复」可把它推到 ${tool} 的技能目录。`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -97,6 +105,7 @@ export default function BackupDialog({ tools, onClose, onChanged }: Props) {
 
         <div className="modal-body">
           {error && <ErrorBanner error={error} />}
+          {notice && <div className="banner info">{notice}</div>}
 
           {loading ? (
             <div className="empty">

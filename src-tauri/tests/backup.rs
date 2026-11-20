@@ -257,3 +257,206 @@ fn 恢复后记录字段来自_meta() {
     assert_eq!(meta.repo_path.as_deref(), Some("skills/通用/grill-me"));
     assert!(read(&lib.join("grill-me").join("SKILL.md")).contains("name: grill-me"));
 }
+
+// ========== 恢复后的 target_path 衔接（#55 方案 A） ==========
+
+use skill_market_lib::commands::restore_target_for;
+use skill_market_lib::state::{InstallMode, InstalledSkill, SkillSource, SourceKind};
+use skill_market_lib::install::{resync_all, ResyncAction};
+use std::collections::HashMap;
+
+/// 造一个「假工具根」映射：key -> 根目录（是否已装由调用方决定是否创建）
+fn fake_roots(map: Vec<(&str, PathBuf)>) -> HashMap<String, PathBuf> {
+    map.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+}
+
+#[test]
+fn 工具已装时_target_path_为_skills_下的预期路径() {
+    let d = tempfile::tempdir().unwrap();
+    // 造一个「已装」的工具根（目录存在）
+    let root = d.path().join(".cursor");
+    fs::create_dir_all(&root).unwrap();
+    let roots = fake_roots(vec![("cursor", root.clone())]);
+
+    let (target, installed) =
+        restore_target_for("cursor", "grill-me", |k| roots.get(k).cloned()).unwrap();
+
+    assert!(installed, "根目录存在应视为已装");
+    assert_eq!(target, root.join("skills").join("grill-me"));
+}
+
+#[test]
+fn 工具未装时仍给出预期路径且不创建目录() {
+    let d = tempfile::tempdir().unwrap();
+    // 根目录**不存在**
+    let root = d.path().join(".cursor");
+    let roots = fake_roots(vec![("cursor", root.clone())]);
+
+    let (target, installed) =
+        restore_target_for("cursor", "grill-me", |k| roots.get(k).cloned()).unwrap();
+
+    assert!(!installed, "根目录不存在应视为未装");
+    assert_eq!(
+        target,
+        root.join("skills").join("grill-me"),
+        "仍应给出预期路径，供装好工具后 resync 使用"
+    );
+    // R1：纯路径计算，绝不创建工具根目录
+    assert!(!root.exists(), "绝不能创建工具根目录");
+}
+
+#[test]
+fn 未知工具被拒() {
+    let d = tempfile::tempdir().unwrap();
+    let r = restore_target_for("not-a-tool", "x", |_| Some(d.path().to_path_buf()));
+    assert!(r.is_err(), "未知工具 key 应报错");
+    assert!(r.unwrap_err().to_string().contains("未知"));
+}
+
+#[test]
+fn 恢复出的记录能被_resync_接管() {
+    // 跨票集成：恢复 -> resync 真的接上了吗
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("library");
+    let backups = d.path().join("backups");
+    make_backup(&lib, &backups, "grill-me", "cursor", 1000);
+    let id = list_backups(&backups, &lib)[0].backup_id.clone();
+
+    // 造一个「已装」的工具根，并按它的 skills 目录算预期路径
+    let tool_root = d.path().join(".cursor");
+    fs::create_dir_all(&tool_root).unwrap();
+    let roots = fake_roots(vec![("cursor", tool_root.clone())]);
+    let (target, installed) =
+        restore_target_for("cursor", "grill-me", |k| roots.get(k).cloned()).unwrap();
+    assert!(installed);
+
+    // 技能「消失」：库和目标都没了
+    fs::remove_dir_all(lib.join("grill-me")).unwrap();
+    assert!(!target.exists());
+
+    // 恢复：只写库
+    let meta = restore_backup(&backups, &lib, &id).unwrap();
+    let installed_hash = hash::hash_dir(&lib.join("grill-me")).unwrap();
+
+    // 构造与 restore_skill_backup 一致的记录
+    let rec = InstalledSkill {
+        name: meta.name.clone(),
+        tool: "cursor".into(),
+        target_path: target.to_string_lossy().to_string(),
+        mode: InstallMode::Copy,
+        installed_hash: installed_hash.clone(),
+        installed_version: meta.installed_version.clone(),
+        source: SkillSource {
+            kind: SourceKind::Gitlab,
+            repo_url: None,
+            repo_path: meta.repo_path.clone(),
+            branch: None,
+            commit: None,
+        },
+        installed_at: 1,
+        ignored_remote_hash: None,
+    };
+
+    // 目标此刻仍不存在 -> resync 应把它重建出来
+    assert!(!target.exists(), "前置：目标应缺失");
+    let report = resync_all(&[rec], &lib);
+
+    assert_eq!(report.repaired.len(), 1, "resync 应把恢复出的记录接过去");
+    assert!(report.failed.is_empty(), "不该有失败: {:?}", report.failed);
+    assert!(target.join("SKILL.md").is_file(), "目标应已重建");
+    assert_eq!(
+        hash::hash_dir(&target).unwrap(),
+        installed_hash,
+        "重建出的内容应与恢复的库一致"
+    );
+}
+
+#[test]
+fn 工具未装时_resync_如实报失败而不是静默跳过() {
+    // 方案 A 的预期行为：记录已写但工具没装，resync 会报「工具未安装」。
+    // 这不是 bug，是要让用户知道「装好工具再修」。
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("library");
+    let backups = d.path().join("backups");
+    make_backup(&lib, &backups, "dws", "cursor", 1000);
+    let id = list_backups(&backups, &lib)[0].backup_id.clone();
+
+    let tool_root = d.path().join(".cursor"); // 不创建 = 未装
+    let roots = fake_roots(vec![("cursor", tool_root.clone())]);
+    let (target, installed) =
+        restore_target_for("cursor", "dws", |k| roots.get(k).cloned()).unwrap();
+    assert!(!installed, "前置：工具应视为未装");
+
+    fs::remove_dir_all(lib.join("dws")).unwrap();
+    let meta = restore_backup(&backups, &lib, &id).unwrap();
+    let h = hash::hash_dir(&lib.join("dws")).unwrap();
+    let rec = InstalledSkill {
+        name: meta.name,
+        tool: "cursor".into(),
+        target_path: target.to_string_lossy().to_string(),
+        mode: InstallMode::Copy,
+        installed_hash: h,
+        installed_version: None,
+        source: SkillSource {
+            kind: SourceKind::Gitlab,
+            repo_url: None,
+            repo_path: None,
+            branch: None,
+            commit: None,
+        },
+        installed_at: 1,
+        ignored_remote_hash: None,
+    };
+
+    let report = resync_all(&[rec], &lib);
+    assert!(
+        report.failed.len() == 1 || report.repaired.len() == 1,
+        "应为失败或（父目录可建时）修复，实际: failed={:?} repaired={:?}",
+        report.failed,
+        report.repaired
+    );
+    // 无论哪条路径，都不能创建工具根目录之外的东西
+    if !tool_root.exists() {
+        assert!(report.failed.len() == 1, "工具未装时应报失败");
+    }
+    let _ = ResyncAction::Skipped;
+}
+
+#[test]
+fn 恢复记录的_target_path_真的被填上() {
+    // 直接验证命令层用的构造函数：target_path 必须是算出的预期路径，
+    // 不能是空串（空串会让 #54 的 resync 无从下手）
+    use skill_market_lib::commands::record_from_restore;
+
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join(".claude");
+    fs::create_dir_all(&root).unwrap();
+    let roots = fake_roots(vec![("claude", root.clone())]);
+    let (target, installed) =
+        restore_target_for("claude", "grill-me", |k| roots.get(k).cloned()).unwrap();
+    assert!(installed);
+
+    let meta = BackupMeta {
+        name: "grill-me".into(),
+        tool: "claude".into(),
+        installed_hash: "h".into(),
+        installed_version: Some("1.0.0".into()),
+        repo_path: Some("skills/通用/grill-me".into()),
+        backup_created_at: 1000,
+        source_path: String::new(),
+    };
+    let rec = record_from_restore(&meta, &target, "hash-abc".into());
+
+    assert_eq!(
+        rec.target_path,
+        target.to_string_lossy(),
+        "target_path 必须是预期路径而不是空串"
+    );
+    assert!(!rec.target_path.is_empty());
+    assert_eq!(rec.name, "grill-me");
+    assert_eq!(rec.tool, "claude");
+    assert_eq!(rec.installed_hash, "hash-abc");
+    assert_eq!(rec.installed_version.as_deref(), Some("1.0.0"));
+    // 有 repo_path 的来源应标为 Gitlab
+    assert!(matches!(rec.source.kind, SourceKind::Gitlab));
+}

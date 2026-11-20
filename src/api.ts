@@ -183,6 +183,13 @@ export interface SkillBackupEntry {
   isRestorable: boolean;
 }
 
+/** 恢复备份的结果 */
+export interface RestoreResult {
+  record: InstalledSkill;
+  /** 目标工具根目录不存在——记录已写，但需先装该工具才能链过去 */
+  pendingTool: boolean;
+}
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
@@ -395,7 +402,7 @@ export const api = {
   resyncSkills: () => invoke<ResyncOutcome>("resync_skills"),
   listSkillBackups: () => invoke<SkillBackupEntry[]>("list_skill_backups"),
   restoreSkillBackup: (backupId: string) =>
-    invoke<InstalledSkill>("restore_skill_backup", { backupId }),
+    invoke<RestoreResult>("restore_skill_backup", { backupId }),
   deleteSkillBackup: (backupId: string) =>
     invoke<void>("delete_skill_backup", { backupId }),
   updateSkill: (name: string, tool: string) =>
