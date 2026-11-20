@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import ErrorBanner from "../components/ErrorBanner";
 import {
   api,
   ConflictChoice,
@@ -20,6 +21,13 @@ interface Props {
   /** 扫描结果由 App 持有，保证侧边栏角标与本页计数同源 */
   items: MySkillItem[];
   onItemsChange: (items: MySkillItem[]) => void;
+  /**
+   * 错误里的「去设置」按钮用
+   *
+   * 可选：App 目前没有把 tab 切换下沉给本页。没有传入时按钮不显示，
+   * 只保留「重试」这类本页能自处理的动作。
+   */
+  onNavigateSettings?: () => void;
 }
 
 type View = "bySkill" | "byTool";
@@ -36,6 +44,7 @@ export default function InstalledPage({
   onRefreshUpdates,
   items,
   onItemsChange,
+  onNavigateSettings,
 }: Props) {
   const [health, setHealth] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -261,7 +270,16 @@ export default function InstalledPage({
           ))}
         </div>
       )}
-      {error && <div className="banner error">{error}</div>}
+      {error && (
+        <ErrorBanner
+          error={error}
+          onAction={(action) => {
+            // 只有「去设置」有明确的落地页；其余动作交回用户自行处理
+            if (action === "open_settings") onNavigateSettings?.();
+            else if (action === "retry") void check();
+          }}
+        />
+      )}
 
       {items.length === 0 ? (
         <div className="empty">

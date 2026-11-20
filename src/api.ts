@@ -107,6 +107,56 @@ export interface RemoteFailure {
   detail: string;
 }
 
+/** 后端结构化错误（skill_error::SkillError 的镜像） */
+export interface SkillErrorPayload {
+  code: string;
+  message: string;
+  detail: string;
+  action: string | null;
+}
+
+/**
+ * 解析后端返回的错误
+ *
+ * 四个高频命令现在返回结构化 JSON；其它命令仍可能返回纯文本。
+ * 两种情况都要能显示，所以解析失败就退回纯文本形态。
+ */
+export function parseError(e: unknown): SkillErrorPayload {
+  const raw = typeof e === "string" ? e : String(e ?? "");
+  try {
+    const v = JSON.parse(raw);
+    if (
+      v &&
+      typeof v === "object" &&
+      typeof v.code === "string" &&
+      typeof v.message === "string"
+    ) {
+      return {
+        code: v.code,
+        message: v.message,
+        detail: typeof v.detail === "string" ? v.detail : "",
+        action: typeof v.action === "string" ? v.action : null,
+      };
+    }
+  } catch {
+    // 不是 JSON，按纯文本处理
+  }
+  return {
+    code: "UNKNOWN",
+    message: raw || "操作失败",
+    detail: raw,
+    action: null,
+  };
+}
+
+/** 动作按钮的文案 */
+export const ACTION_LABEL: Record<string, string> = {
+  retry: "重试",
+  open_settings: "去设置",
+  reinstall: "卸载重装",
+  contact_it: "联系 IT",
+};
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
