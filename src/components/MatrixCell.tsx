@@ -65,14 +65,35 @@ export function MatrixCell({
 interface HeaderProps {
   toolKey: string;
   label: string;
+  /** 当前筛选范围内该工具下已装的技能数 */
   count: number;
+  /** 当前筛选范围内的技能总数 */
+  total: number;
+  /** 展开菜单 */
+  onClick: () => void;
+  active: boolean;
 }
 
-export function MatrixHeader({ toolKey, label, count }: HeaderProps) {
+export function MatrixHeader({
+  toolKey,
+  label,
+  count,
+  total,
+  onClick,
+  active,
+}: HeaderProps) {
   return (
-    <th className="matrix-col" title={label}>
-      <span className="matrix-glyph">{toolGlyph(toolKey)}</span>
-      <span className="matrix-count">{count}</span>
+    <th className="matrix-col">
+      <button
+        type="button"
+        className={`matrix-header-btn ${active ? "active" : ""}`}
+        title={`${label}：${count} / ${total} 个技能已装，点击查看批量操作`}
+        aria-label={`${label} 批量操作`}
+        onClick={onClick}
+      >
+        <span className="matrix-glyph">{toolGlyph(toolKey)}</span>
+        <span className="matrix-count">{count}</span>
+      </button>
     </th>
   );
 }

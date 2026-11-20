@@ -834,3 +834,54 @@ input[type="checkbox"] {
   padding-left: 9px;
   white-space: nowrap;
 }
+
+/* ========== 矩阵批量操作 ========== */
+
+.matrix-header-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.matrix-header-btn:hover,
+.matrix-header-btn.active {
+  background: var(--bg-sub);
+}
+
+.matrix-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sub);
+  max-width: 320px;
+}
+
+.matrix-popover button {
+  text-align: left;
+}
+
+.matrix-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sub);
+}
+
+.matrix-menu button {
+  text-align: left;
+}
