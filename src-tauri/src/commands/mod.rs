@@ -210,73 +210,77 @@ pub fn scan_skills(state: State<'_, AppState>) -> Result<Vec<MySkillItem>, Strin
     Ok(build_my_skills(&scanned, &installs, app_data.as_deref()))
 }
 
-/// 把扫描结果与安装记录合并成按名聚合的列表
+/// 把扫描结果与安装记录合并成「我的技能」列表
+///
+/// 扫描结果已按目录名聚合（一个技能一条），所以这里**不再按 name 合并**——
+/// 那样会把两个目录不同、内容不同但 frontmatter 同名的技能错并成一行。
 pub fn build_my_skills(
     scanned: &[crate::scan::ScannedSkill],
     installs: &[InstalledSkill],
     app_data: Option<&str>,
 ) -> Vec<MySkillItem> {
-    let mut order: Vec<String> = Vec::new();
-    let mut by_name: std::collections::HashMap<String, MySkillItem> = Default::default();
+    let mut out = Vec::with_capacity(scanned.len());
 
     for s in scanned {
-        let identity = judge_identity(
-            &s.target_path,
-            &s.tool,
-            s.is_link,
-            s.link_target.as_deref(),
-            installs,
-            app_data,
-        );
-        let rec = (identity == "managed")
-            .then(|| {
-                installs
-                    .iter()
-                    .find(|r| r.tool == s.tool && r.target_path == s.target_path)
-            })
-            .flatten();
-
-        let entry = by_name.entry(s.name.clone()).or_insert_with(|| {
-            order.push(s.name.clone());
-            MySkillItem {
-                name: s.name.clone(),
-                tools: Vec::new(),
-                target_paths: Vec::new(),
-                description: s.description.clone(),
-                version: s.version.clone(),
-                identity: "local".into(),
-                status: None,
-                installed_version: None,
-            }
-        });
-
-        entry.tools.push(s.tool.clone());
-        entry.target_paths.push(s.target_path.clone());
-        if entry.description.is_empty() {
-            entry.description = s.description.clone();
-        }
-        if entry.version.is_none() {
-            entry.version = s.version.clone();
-        }
-
-        // 聚合时取最高优先级：managed > external > local
+        // 一个技能可能装在多个工具下，身份取最高优先级
         let rank = |id: &str| match id {
             "managed" => 2,
             "external" => 1,
             _ => 0,
         };
-        if rank(identity) > rank(&entry.identity) {
-            entry.identity = identity.to_string();
+
+        let mut identity = "local".to_string();
+        let mut installed_version = None;
+        let mut tools = Vec::new();
+        let mut target_paths = Vec::new();
+
+        let placements = if s.placements.is_empty() {
+            // 兼容手工构造的扫描结果（只有一个落盘）
+            vec![crate::scan::SkillPlacement {
+                tool: s.tool.clone(),
+                target_path: s.target_path.clone(),
+                is_link: s.is_link,
+                link_target: s.link_target.clone(),
+            }]
+        } else {
+            s.placements.clone()
+        };
+
+        for p in &placements {
+            let id = judge_identity(
+                &p.target_path,
+                &p.tool,
+                p.is_link,
+                p.link_target.as_deref(),
+                installs,
+                app_data,
+            );
+            if rank(id) > rank(&identity) {
+                identity = id.to_string();
+            }
+            if let Some(rec) = installs
+                .iter()
+                .find(|r| r.tool == p.tool && r.target_path == p.target_path)
+            {
+                installed_version = rec.installed_version.clone();
+            }
+            tools.push(p.tool.clone());
+            target_paths.push(p.target_path.clone());
         }
-        if let Some(r) = rec {
-            entry.installed_version = r.installed_version.clone();
-        }
+
+        out.push(MySkillItem {
+            name: s.name.clone(),
+            tools,
+            target_paths,
+            description: s.description.clone(),
+            version: s.version.clone(),
+            identity,
+            status: None,
+            installed_version,
+        });
     }
 
-    order
-        .into_iter()
-        .filter_map(|n| by_name.remove(&n))
-        .collect()
+    out
 }
 
 /// 构造一条「纳入管理」的安装记录
