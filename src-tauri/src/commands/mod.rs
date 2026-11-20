@@ -1055,6 +1055,66 @@ pub async fn skill_history(
         .map_err(|e| e.to_string())
 }
 
+/// 重新同步的结果（前端展示用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResyncOutcome {
+    /// 成功修复的技能名
+    pub repaired: Vec<String>,
+    /// 无需操作的
+    pub skipped: Vec<String>,
+    /// 失败的
+    pub failed: Vec<ResyncFailure>,
+    /// 因本地被改而保护性跳过
+    pub skipped_modified: Vec<ResyncFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResyncFailure {
+    pub name: String,
+    pub tool: String,
+    pub message: String,
+}
+
+/// 检查并修复「记录还在但目录没了」的技能
+///
+/// 逐条独立：一条修不了不影响其他（用 Vec 收集而不是 `?` 提前返回）。
+/// 唯一的致命错误是拿不到库路径——那说明环境本身有问题。
+#[tauri::command]
+pub fn resync_skills(state: State<'_, AppState>) -> Result<ResyncOutcome, String> {
+    // 全程持写锁：重建链接/复制都是同步文件操作，不能与更新/安装交错
+    let _write = crate::skill_lock::write_guard();
+
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let records = lock(&state)?.installs.clone();
+
+    let report = crate::install::resync_all(&records, &library_root);
+
+    Ok(ResyncOutcome {
+        repaired: report.repaired.into_iter().map(|(n, _)| n).collect(),
+        skipped: report.skipped.into_iter().map(|(n, _)| n).collect(),
+        failed: report
+            .failed
+            .into_iter()
+            .map(|(name, tool, message)| ResyncFailure {
+                name,
+                tool,
+                message,
+            })
+            .collect(),
+        skipped_modified: report
+            .skipped_modified
+            .into_iter()
+            .map(|(name, tool)| ResyncFailure {
+                name,
+                tool,
+                message: "内容被修改过，为保护你的改动已跳过".to_string(),
+            })
+            .collect(),
+    })
+}
+
 /// 发布前快照列表
 #[tauri::command]
 pub fn list_snapshots() -> Result<Vec<crate::publish::Snapshot>, String> {
