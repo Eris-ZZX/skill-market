@@ -171,6 +171,18 @@ export interface ResyncFailure {
   message: string;
 }
 
+/** 一条备份 */
+export interface SkillBackupEntry {
+  backupId: string;
+  name: string;
+  tool: string;
+  installedVersion: string | null;
+  backupCreatedAt: number;
+  sizeBytes: number;
+  /** 库里当前没有同名技能时才可恢复 */
+  isRestorable: boolean;
+}
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
@@ -381,6 +393,11 @@ export const api = {
     invoke<void>("uninstall_skill", { name, tool }),
   checkUpdates: () => invoke<UpdateCheckResult>("check_updates"),
   resyncSkills: () => invoke<ResyncOutcome>("resync_skills"),
+  listSkillBackups: () => invoke<SkillBackupEntry[]>("list_skill_backups"),
+  restoreSkillBackup: (backupId: string) =>
+    invoke<InstalledSkill>("restore_skill_backup", { backupId }),
+  deleteSkillBackup: (backupId: string) =>
+    invoke<void>("delete_skill_backup", { backupId }),
   updateSkill: (name: string, tool: string) =>
     invoke<InstalledSkill>("update_skill", { name, tool }),
   resolveConflict: (name: string, tool: string, choice: ConflictChoice) =>

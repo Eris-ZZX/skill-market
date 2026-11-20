@@ -1115,6 +1115,106 @@ pub fn resync_skills(state: State<'_, AppState>) -> Result<ResyncOutcome, String
     })
 }
 
+/// 一条备份的清单项（前端展示用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillBackupEntry {
+    /// 备份目录名，恢复/删除时原样传回
+    pub backup_id: String,
+    pub name: String,
+    pub tool: String,
+    pub installed_version: Option<String>,
+    pub backup_created_at: i64,
+    pub size_bytes: u64,
+    /// 库里当前没有同名技能时才可恢复
+    pub is_restorable: bool,
+}
+
+/// 列出全部备份，按时间倒序
+#[tauri::command]
+pub fn list_skill_backups() -> Result<Vec<SkillBackupEntry>, String> {
+    let _read = crate::skill_lock::read_guard();
+    let app_data = crate::storage::app_data_dir().map_err(|e| e.to_string())?;
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let backups = crate::install::backups_root(&app_data);
+
+    Ok(crate::install::list_backups(&backups, &library_root)
+        .into_iter()
+        .map(|e| SkillBackupEntry {
+            backup_id: e.backup_id,
+            name: e.meta.name,
+            tool: e.meta.tool,
+            installed_version: e.meta.installed_version,
+            backup_created_at: e.meta.backup_created_at,
+            size_bytes: e.size_bytes,
+            is_restorable: e.is_restorable,
+        })
+        .collect())
+}
+
+/// 把一份备份恢复到库里
+///
+/// 只写库，不自动链到工具目录——恢复时那些目标可能已被占用。
+/// 用户之后用「检查并修复」按记录推过去。
+#[tauri::command]
+pub fn restore_skill_backup(
+    state: State<'_, AppState>,
+    backup_id: String,
+) -> Result<InstalledSkill, String> {
+    let _write = crate::skill_lock::write_guard();
+    let app_data = crate::storage::app_data_dir().map_err(|e| e.to_string())?;
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let backups = crate::install::backups_root(&app_data);
+
+    let meta = crate::install::restore_backup(&backups, &library_root, &backup_id)
+        .map_err(|e| crate::skill_error::error_json(e))?;
+
+    // 恢复出来的库内容算一次指纹，作为这条记录的 installed_hash
+    let installed_hash = crate::hash::hash_dir(&library_root.join(&meta.name))
+        .map_err(|e| crate::skill_error::error_json(e))?;
+
+    let rec = InstalledSkill {
+        name: meta.name.clone(),
+        tool: meta.tool.clone(),
+        // 还没链到工具目录，路径留空；「检查并修复」会按记录补齐
+        target_path: String::new(),
+        mode: InstallMode::Copy,
+        installed_hash,
+        installed_version: meta.installed_version.clone(),
+        source: SkillSource {
+            kind: if meta.repo_path.is_some() {
+                SourceKind::Gitlab
+            } else {
+                SourceKind::Local
+            },
+            repo_url: None,
+            repo_path: meta.repo_path.clone(),
+            branch: None,
+            commit: None,
+        },
+        installed_at: chrono::Utc::now().timestamp(),
+        ignored_remote_hash: None,
+    };
+
+    let mut guard = lock(&state)?;
+    guard
+        .installs
+        .retain(|x| !(x.name == rec.name && x.tool == rec.tool));
+    guard.installs.push(rec.clone());
+    crate::storage::save(&guard).map_err(|e| crate::skill_error::error_json(e))?;
+    Ok(rec)
+}
+
+/// 删除一份备份
+#[tauri::command]
+pub fn delete_skill_backup(backup_id: String) -> Result<(), String> {
+    let _write = crate::skill_lock::write_guard();
+    let app_data = crate::storage::app_data_dir().map_err(|e| e.to_string())?;
+    let backups = crate::install::backups_root(&app_data);
+    crate::install::delete_backup(&backups, &backup_id)
+        .map_err(|e| crate::skill_error::error_json(e))
+}
+
 /// 发布前快照列表
 #[tauri::command]
 pub fn list_snapshots() -> Result<Vec<crate::publish::Snapshot>, String> {

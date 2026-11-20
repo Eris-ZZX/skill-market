@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import BackupDialog from "../components/BackupDialog";
 import ErrorBanner from "../components/ErrorBanner";
 import InstallDialog from "../components/InstallDialog";
 import { MatrixCell, MatrixHeader } from "../components/MatrixCell";
@@ -166,6 +167,7 @@ export default function InstalledPage({
 
   const [resyncing, setResyncing] = useState(false);
   const [resyncResult, setResyncResult] = useState<string | null>(null);
+  const [showBackups, setShowBackups] = useState(false);
 
   /**
    * 检查并修复「记录还在但目录没了」的技能
@@ -354,6 +356,9 @@ export default function InstalledPage({
           {pendingCount > 0 && ` · ${pendingCount} 项待处理`}
         </span>
         <div className="spacer" />
+        <button onClick={() => setShowBackups(true)} disabled={loading}>
+          备份
+        </button>
         <button onClick={resync} disabled={loading || resyncing}>
           {resyncing && <span className="spinner" />}
           检查并修复
@@ -736,6 +741,14 @@ export default function InstalledPage({
             </div>
           </div>
         </div>
+      )}
+
+      {showBackups && (
+        <BackupDialog
+          tools={tools}
+          onClose={() => setShowBackups(false)}
+          onChanged={() => void load()}
+        />
       )}
 
       {installTarget && (

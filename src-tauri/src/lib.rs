@@ -256,6 +256,9 @@ pub fn run() {
             commands::uninstall_skill,
             commands::check_updates,
             commands::resync_skills,
+            commands::list_skill_backups,
+            commands::restore_skill_backup,
+            commands::delete_skill_backup,
             // 发布 / 历史 / 回滚
             commands::publish_skill,            commands::skill_history,
             commands::list_snapshots,
