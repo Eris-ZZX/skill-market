@@ -73,7 +73,12 @@ export interface UpdateCheckItem {
   status: UpdateStatus;
   installedVersion: string | null;
   remoteVersion: string | null;
+  /** 用户已对这个远端版本选了「保留我的」，界面不再计入待处理 */
+  ignored: boolean;
 }
+
+/** 冲突处理的三选一 */
+export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
 export interface AppInfo {
   name: string;
@@ -175,7 +180,7 @@ const PENDING_STATUSES: UpdateStatus[] = [
  * 待处理条数：侧边栏角标与页内文案共用这一份口径
  *
  * 口径 = 身份为 local 的技能数 + managed 且状态需要处理的技能数。
- * 两处各写一份过滤条件必然分叉（#21 已统一过一次，又分叉过一次）。
+ * 已选「保留我的」的条目不再计入——用户已经表态过了。
  */
 export function countPending(
   items: MySkillItem[],
@@ -187,7 +192,7 @@ export function countPending(
     // 按 (技能名, 工具) 取状态：同名技能可能装在多个工具下，状态各不相同
     return placements(i).some((p) => {
       const u = updates.find((x) => x.name === i.name && x.tool === p.tool);
-      return u ? PENDING_STATUSES.includes(u.status) : false;
+      return u ? !u.ignored && PENDING_STATUSES.includes(u.status) : false;
     });
   }).length;
 }
@@ -229,6 +234,8 @@ export const api = {
   checkUpdates: () => invoke<UpdateCheckItem[]>("check_updates"),
   updateSkill: (name: string, tool: string) =>
     invoke<InstalledSkill>("update_skill", { name, tool }),
+  resolveConflict: (name: string, tool: string, choice: ConflictChoice) =>
+    invoke<InstalledSkill>("resolve_conflict", { name, tool, choice }),
 
   // 发布 / 历史 / 回滚
   publishSkill: (req: PublishRequest) =>

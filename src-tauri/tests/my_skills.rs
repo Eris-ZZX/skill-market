@@ -25,6 +25,7 @@ fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
             commit: None,
         },
         installed_at: 0,
+        ignored_remote_hash: None,
     }
 }
 

@@ -4,7 +4,8 @@
 //! 所有命令返回 `Result<T, String>`，错误直接展示给用户。
 
 use crate::state::{
-    judge_record, InstallMode, InstalledSkill, SkillSource, SourceKind, UpdateStatus,
+    judge_record, ConflictChoice, InstallMode, InstalledSkill, SkillSource, SourceKind,
+    UpdateStatus,
 };
 use crate::storage::{AppSettings, PersistedState};
 use crate::tools::{self, ToolDetection, ToolKind};
@@ -301,6 +302,7 @@ pub fn adopt_record(name: String, tool: String, target_path: String) -> Result<I
             commit: None,
         },
         installed_at: chrono::Utc::now().timestamp(),
+        ignored_remote_hash: None,
     })
 }
 
@@ -452,10 +454,20 @@ pub async fn update_skill(
 
     // 7. 备份当前库内容；备份是兜底而非前置条件，失败只记日志
     if let Ok(app_data) = crate::storage::app_data_dir() {
+        let meta = crate::install::BackupMeta {
+            name: name.clone(),
+            tool: tool.clone(),
+            installed_hash: target_rec.installed_hash.clone(),
+            installed_version: target_rec.installed_version.clone(),
+            repo_path: Some(repo_path.clone()),
+            backup_created_at: chrono::Utc::now().timestamp(),
+            source_path: String::new(),
+        };
         if let Err(e) = crate::install::backup_library(
             &library_root,
             &name,
             &crate::install::backups_root(&app_data),
+            Some(&meta),
         ) {
             log::warn!("更新前备份 {name} 失败: {e}");
         }
@@ -485,6 +497,196 @@ pub async fn update_skill(
     updated.ok_or_else(|| "更新后找不到记录".to_string())
 }
 
+/// 处理「本地改过」与「本地改过 + 远端也改」两种状态
+///
+/// 三个分支共用一套落盘动作，区别只在最后怎么摆放文件：
+/// 保留我的＝什么都不做，用远端＝备份后覆盖，另存一份＝改名后装回官方版。
+#[tauri::command]
+pub async fn resolve_conflict(
+    state: State<'_, AppState>,
+    name: String,
+    tool: String,
+    choice: ConflictChoice,
+) -> Result<InstalledSkill, String> {
+    let (cfg, snapshot) = {
+        let guard = lock(&state)?;
+        let cfg = build_gitlab_config(&guard.settings)?;
+        let recs: Vec<InstalledSkill> = guard
+            .installs
+            .iter()
+            .filter(|r| r.name == name)
+            .cloned()
+            .collect();
+        (cfg, recs)
+    };
+
+    let target_rec = snapshot
+        .iter()
+        .find(|r| r.tool == tool)
+        .ok_or_else(|| format!("{name} 未安装在 {tool} 上"))?
+        .clone();
+    let repo_path = target_rec
+        .source
+        .repo_path
+        .clone()
+        .ok_or_else(|| "本地导入的技能没有远端版本可对比".to_string())?;
+
+    crate::install::require_valid_directory(&name).map_err(|e| e.to_string())?;
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let app_data = crate::storage::app_data_dir().map_err(|e| e.to_string())?;
+    let backups = crate::install::backups_root(&app_data);
+
+    // 保留我的：不动任何文件，只记下「忽略到哪个远端哈希」
+    if choice == ConflictChoice::KeepMine {
+        let remote_hash = fetch_remote_hash(&cfg, &repo_path).await?;
+        let mut guard = lock(&state)?;
+        let rec = guard
+            .installs
+            .iter_mut()
+            .find(|r| r.name == name && r.tool == tool)
+            .ok_or_else(|| format!("{name} 的安装记录已不存在"))?;
+        rec.ignored_remote_hash = Some(remote_hash);
+        let out = rec.clone();
+        crate::storage::save(&guard).map_err(|e| e.to_string())?;
+        return Ok(out);
+    }
+
+    // 后两个分支都要拿远端内容，先把包下下来
+    let downloaded = crate::commands::market::download_skill_package(cfg, &repo_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 下载期间记录可能变化，与 update_skill 同样要在写盘前重新确认
+    {
+        let guard = lock(&state)?;
+        let current = guard
+            .installs
+            .iter()
+            .find(|r| r.name == name && r.tool == tool)
+            .ok_or_else(|| format!("{name} 已被卸载，操作取消"))?;
+        if current.target_path != target_rec.target_path
+            || current.installed_hash != target_rec.installed_hash
+        {
+            return Err("下载期间安装记录已变化，请重试".into());
+        }
+    }
+
+    // 两个分支都会先备份当前库——用户的改动不能无声消失
+    let meta = crate::install::BackupMeta {
+        name: name.clone(),
+        tool: tool.clone(),
+        installed_hash: target_rec.installed_hash.clone(),
+        installed_version: target_rec.installed_version.clone(),
+        repo_path: Some(repo_path.clone()),
+        backup_created_at: chrono::Utc::now().timestamp(),
+        source_path: String::new(),
+    };
+    let backup_dir = crate::install::backup_library(&library_root, &name, &backups, Some(&meta))
+        .map_err(|e| format!("备份本地版本失败，已中止以避免丢失改动: {e}"))?;
+
+    match choice {
+        ConflictChoice::UseRemote => {
+            // 备份已在上面落盘，这里直接覆盖
+            apply_remote(&downloaded, &name, &snapshot)?;
+            let hash = crate::hash::hash_dir(&library_root.join(&name))
+                .map_err(|e| e.to_string())?;
+            write_after_resolve(
+                &state,
+                &name,
+                &hash,
+                downloaded.version.clone(),
+                &snapshot,
+                false,
+            )
+            .map(|r| {
+                log::info!("已用远端覆盖 {name}，原内容备份在 {}", backup_dir.display());
+                r
+            })
+        }
+        ConflictChoice::KeepBoth => {
+            // 当前库改名保留，再放回官方版
+            let local_name = crate::install::unique_sibling_name(&library_root, &format!("{name}-local"))
+                .map_err(|e| e.to_string())?;
+            crate::install::restore_backup_as(&backup_dir, &library_root, &local_name)
+                .map_err(|e| e.to_string())?;
+            apply_remote(&downloaded, &name, &snapshot)?;
+            let hash = crate::hash::hash_dir(&library_root.join(&name))
+                .map_err(|e| e.to_string())?;
+            write_after_resolve(
+                &state,
+                &name,
+                &hash,
+                downloaded.version.clone(),
+                &snapshot,
+                false,
+            )
+            .map(|r| {
+                log::info!("已保留你的改动为 {local_name}，并装回官方版 {name}");
+                r
+            })
+        }
+        ConflictChoice::KeepMine => unreachable!("已在上面提前返回"),
+    }
+}
+
+/// 只取远端当前哈希，不下载内容
+async fn fetch_remote_hash(
+    cfg: &crate::gitlab::GitLabConfig,
+    repo_path: &str,
+) -> Result<String, String> {
+    let index = crate::commands::market::fetch_index(cfg.clone())
+        .await
+        .map_err(|e| format!("无法获取远端索引：{e}"))?;
+    index
+        .iter()
+        .find(|r| r.repo_path == repo_path)
+        .map(|r| r.hash.clone())
+        .ok_or_else(|| format!("远端已找不到 {repo_path}"))
+}
+
+/// 把远端内容写进库，并按记录各自的 mode 处理工具目录
+fn apply_remote(
+    downloaded: &crate::commands::market::DownloadedSkill,
+    name: &str,
+    snapshot: &[InstalledSkill],
+) -> Result<(), String> {
+    let targets: Vec<(std::path::PathBuf, InstallMode)> = snapshot
+        .iter()
+        .map(|r| (std::path::PathBuf::from(&r.target_path), r.mode))
+        .collect();
+    crate::commands::market::deploy_downloaded(downloaded, name, &targets)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// 覆盖成功后刷新记录：哈希、版本，并清掉之前的忽略标记
+fn write_after_resolve(
+    state: &State<'_, AppState>,
+    name: &str,
+    new_hash: &str,
+    new_version: Option<String>,
+    snapshot: &[InstalledSkill],
+    keep_ignored: bool,
+) -> Result<InstalledSkill, String> {
+    let mut guard = lock(state)?;
+    let now = chrono::Utc::now().timestamp();
+    let mut out = None;
+    for rec in guard.installs.iter_mut().filter(|r| r.name == name) {
+        rec.installed_hash = new_hash.to_string();
+        rec.installed_version = new_version.clone();
+        rec.installed_at = now;
+        if !keep_ignored {
+            // 内容已经与远端一致，忽略标记没有意义了
+            rec.ignored_remote_hash = None;
+        }
+        if snapshot.iter().any(|s| s.tool == rec.tool) {
+            out = Some(rec.clone());
+        }
+    }
+    crate::storage::save(&guard).map_err(|e| e.to_string())?;
+    out.ok_or_else(|| "处理后找不到记录".to_string())
+}
+
 #[tauri::command]
 pub fn uninstall_skill(
     state: State<'_, AppState>,
@@ -509,6 +711,8 @@ pub struct UpdateCheckItem {
     pub status: UpdateStatus,
     pub installed_version: Option<String>,
     pub remote_version: Option<String>,
+    /// 用户已对这个远端哈希选了「保留我的」，界面不该再计入待处理
+    pub ignored: bool,
 }
 
 /// 在远端索引里找与某条安装记录对应的技能
@@ -562,12 +766,20 @@ pub async fn check_updates(state: State<'_, AppState>) -> Result<Vec<UpdateCheck
             judge_record(&rec.installed_hash, local.as_deref(), remote_hash.as_deref())
         };
 
+        // 忽略标记只抑制提示，不改状态：本地确实还和安装时不同。
+        // 远端哈希再变时该标记自然失效（比较的是哈希相等，不是「有过标记」）。
+        let ignored = match (&rec.ignored_remote_hash, &remote_hash) {
+            (Some(seen), Some(now)) => seen == now,
+            _ => false,
+        };
+
         out.push(UpdateCheckItem {
             name: rec.name.clone(),
             tool: rec.tool.clone(),
             status,
             installed_version: rec.installed_version.clone(),
             remote_version,
+            ignored,
         });
     }
     Ok(out)

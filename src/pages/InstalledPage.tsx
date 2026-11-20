@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
+  ConflictChoice,
   countPending,
   MySkillItem,
   placements,
@@ -83,6 +84,10 @@ export default function InstalledPage({
   };
 
   const [updating, setUpdating] = useState<string | null>(null);
+  // 冲突/已修改的处理弹层：{技能名, 工具, 当前状态}
+  const [resolving, setResolving] = useState<
+    { name: string; tool: string; status: string } | null
+  >(null);
 
   const update = async (name: string, tool: string) => {
     setUpdating(`${name}-${tool}`);
@@ -91,6 +96,26 @@ export default function InstalledPage({
       await api.updateSkill(name, tool);
       await load();
       // 更新后状态必须重算，否则旧蓝标会留在界面上
+      const u = await api.checkUpdates().catch(() => []);
+      onRefreshUpdates(u);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const resolve = async (
+    name: string,
+    tool: string,
+    choice: ConflictChoice,
+  ) => {
+    setUpdating(`${name}-${tool}`);
+    setError(null);
+    try {
+      await api.resolveConflict(name, tool, choice);
+      setResolving(null);
+      await load();
       const u = await api.checkUpdates().catch(() => []);
       onRefreshUpdates(u);
     } catch (e) {
@@ -287,7 +312,7 @@ export default function InstalledPage({
                         ) : (
                           item.identity === "managed" && (
                             <div style={{ display: "flex", gap: 6 }}>
-                              {/* 只有「可更新」才给入口；其余状态没有可执行的动作 */}
+                              {/* 只有「可更新」才给直接更新入口 */}
                               {updateOf(item.name, spots[0].tool)?.status ===
                                 "updateavailable" && (
                                 <button
@@ -301,6 +326,29 @@ export default function InstalledPage({
                                   更新
                                 </button>
                               )}
+                              {/* 冲突与已修改都需要用户选一个处理方式 */}
+                              {(() => {
+                                const u = updateOf(item.name, spots[0].tool);
+                                if (!u) return null;
+                                if (u.status !== "conflict" && u.status !== "locallymodified")
+                                  return null;
+                                if (u.ignored)
+                                  return <span className="page-sub">已忽略此次更新</span>;
+                                return (
+                                  <button
+                                    className="primary sm"
+                                    onClick={() =>
+                                      setResolving({
+                                        name: item.name,
+                                        tool: spots[0].tool,
+                                        status: u.status,
+                                      })
+                                    }
+                                  >
+                                    处理
+                                  </button>
+                                );
+                              })()}
                               <button
                                 className="danger sm"
                                 onClick={() =>
@@ -389,6 +437,84 @@ export default function InstalledPage({
             ))
           )}
         </>
+      )}
+
+      {resolving && (
+        <div className="overlay" onClick={() => setResolving(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <h2 className="modal-title">处理 {resolving.name}</h2>
+                <div className="page-sub">
+                  {resolving.status === "conflict"
+                    ? "本地改过，远端也更新了"
+                    : "本地改过，远端没有新版本"}
+                </div>
+              </div>
+            </div>
+            <div className="modal-body">
+              <div className="detail-text">
+                选择后会发生什么，逐条写在下面。所有会覆盖或移动你改动的方式，
+                都会先把当前版本备份一份。
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 500 }}>保留我的</div>
+                <div className="hint">
+                  不动任何文件，只记下「这次更新我不需要」。远端下次再变会重新提示。
+                </div>
+                <button
+                  className="primary sm"
+                  style={{ marginTop: 6 }}
+                  disabled={updating !== null}
+                  onClick={() => resolve(resolving.name, resolving.tool, "keepmine")}
+                >
+                  保留我的
+                </button>
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 500 }}>
+                  {resolving.status === "conflict" ? "用远端版本" : "重置为仓库版"}
+                </div>
+                <div className="hint">
+                  用仓库里的最新内容覆盖本地，你的改动会先备份。覆盖后本地与本仓库一致。
+                </div>
+                <button
+                  className="danger sm"
+                  style={{ marginTop: 6 }}
+                  disabled={updating !== null}
+                  onClick={() => resolve(resolving.name, resolving.tool, "useremote")}
+                >
+                  {resolving.status === "conflict" ? "用远端版本" : "重置为仓库版"}
+                </button>
+              </div>
+
+              {resolving.status === "conflict" && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontWeight: 500 }}>另存一份</div>
+                  <div className="hint">
+                    把你的改动另存为 <span className="mono">{resolving.name}-local</span>
+                    （重名会自动加序号），同时装回官方版本。
+                  </div>
+                  <button
+                    className="primary sm"
+                    style={{ marginTop: 6 }}
+                    disabled={updating !== null}
+                    onClick={() => resolve(resolving.name, resolving.tool, "keepboth")}
+                  >
+                    另存一份
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button onClick={() => setResolving(null)} disabled={updating !== null}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmUninstall && (

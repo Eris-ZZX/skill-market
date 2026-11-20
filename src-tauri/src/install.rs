@@ -269,6 +269,7 @@ pub fn install_many(
             installed_version: version.clone(),
             source: source.clone(),
             installed_at: chrono::Utc::now().timestamp(),
+            ignored_remote_hash: None,
         });
     }
     Ok(out)
@@ -308,15 +309,39 @@ fn prepare_library(source_dir: &Path, library_root: &Path, dir_name: &str) -> Re
     Ok(ssot)
 }
 
+/// 备份元数据
+///
+/// 与内容一起落盘，用于「用远端」与「另存一份」之后能找回原样。
+/// 反序列化后其中的 `name` 是不可信输入，拼路径前必须重新校验。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupMeta {
+    pub name: String,
+    pub tool: String,
+    pub installed_hash: String,
+    pub installed_version: Option<String>,
+    pub repo_path: Option<String>,
+    pub backup_created_at: i64,
+    pub source_path: String,
+}
+
+/// 每个技能最多保留的备份份数
+pub const BACKUP_RETAIN_COUNT: usize = 20;
+
 /// 备份目录根：`<app_data>/backups`
 pub fn backups_root(app_data: &Path) -> PathBuf {
     app_data.join("backups")
 }
 
-/// 把当前库内容备份到 `<root>/<YYYYMMDD_HHMMSS>_<name>/`，重名加 `_1` `_2`
+/// 把当前库内容备份到 `<root>/<YYYYMMDD_HHMMSS>_<name>/`，并写 meta.json
 ///
 /// 备份是兜底而非前置条件：失败只返回 Err 供调用方 warn，不中断更新。
-pub fn backup_library(library_root: &Path, name: &str, backups: &Path) -> Result<PathBuf> {
+pub fn backup_library(
+    library_root: &Path,
+    name: &str,
+    backups: &Path,
+    meta: Option<&BackupMeta>,
+) -> Result<PathBuf> {
     let ssot = library_root.join(name);
     if !ssot.is_dir() {
         bail!("技能库里没有 {name}，无需备份");
@@ -330,7 +355,137 @@ pub fn backup_library(library_root: &Path, name: &str, backups: &Path) -> Result
         n += 1;
     }
     copy_dir_recursive(&ssot, &dest)?;
+
+    if let Some(meta) = meta {
+        let with_path = BackupMeta {
+            source_path: dest.to_string_lossy().to_string(),
+            ..meta.clone()
+        };
+        std::fs::write(
+            dest.join("meta.json"),
+            serde_json::to_vec_pretty(&with_path)?,
+        )?;
+    }
+
+    prune_backups(backups, name, BACKUP_RETAIN_COUNT);
     Ok(dest)
+}
+
+/// 找一个不冲突的同级名字：`<base>` 被占就试 `<base>-2`、`-3`…，最多 10 次
+///
+/// 绝不静默覆盖：重名到上限就报错，让用户自己决定怎么处理。
+pub fn unique_sibling_name(library_root: &Path, base: &str) -> Result<String> {
+    if !library_root.join(base).exists() && !is_link(&library_root.join(base)) {
+        return Ok(base.to_string());
+    }
+    for n in 2..=10 {
+        let candidate = format!("{base}-{n}");
+        let p = library_root.join(&candidate);
+        if !p.exists() && !is_link(&p) {
+            return Ok(candidate);
+        }
+    }
+    bail!("{base} 及其变体都已存在（试到 -10），请先清理后重试");
+}
+
+/// 只保留最近的 N 份，超出删最旧
+fn prune_backups(backups: &Path, name: &str, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(backups) else {
+        return;
+    };
+    // 目录名形如 `20250101_120000_<name>` 或 `..._<name>_2`；时间戳前缀
+    // 保证字典序即时间序，所以排序后取前面删掉就是删最旧
+    let suffix = format!("_{name}");
+    let numbered = format!("_{name}_");
+    let mut mine: Vec<PathBuf> = rd
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.ends_with(&suffix) || n.contains(&numbered)
+        })
+        .map(|e| e.path())
+        .collect();
+    mine.sort();
+    let excess = mine.len().saturating_sub(keep);
+    for old in mine.into_iter().take(excess) {
+        let _ = std::fs::remove_dir_all(old);
+    }
+}
+
+/// 读出备份的 meta.json，并校验其中的目录名
+///
+/// meta.json 可能是手工放置或来自不可信备份，`name` 直接 join 会穿越出
+/// 库目录写任意位置，所以必须重新校验。
+pub fn read_backup_meta(backup_dir: &Path) -> Result<BackupMeta> {
+    let raw = std::fs::read(backup_dir.join("meta.json"))
+        .with_context(|| format!("备份缺少 meta.json: {}", backup_dir.display()))?;
+    let meta: BackupMeta = serde_json::from_slice(&raw)?;
+    require_valid_directory(&meta.name)?;
+    Ok(meta)
+}
+
+/// 把备份内容恢复成一个新的技能目录 `<library>/<target_name>`
+///
+/// 目标已存在时拒绝，绝不静默覆盖。
+pub fn restore_backup_as(
+    backup_dir: &Path,
+    library_root: &Path,
+    target_name: &str,
+) -> Result<PathBuf> {
+    require_valid_directory(target_name)?;
+    let dest = library_root.join(target_name);
+    if dest.exists() || is_link(&dest) {
+        bail!("目标已存在，不能覆盖: {}", dest.display());
+    }
+    // 备份里如果有 meta.json，它是元数据不是技能内容，不该带进新技能
+    copy_dir_recursive_skipping(backup_dir, &dest, &["meta.json"])?;
+
+    // frontmatter 里的 name 还写着原名，而「我的技能」按 name 聚合。
+    // 不改的话另存出来的副本会和正本合并成一行，用户看不到两份。
+    if let Err(e) = rewrite_frontmatter_name(&dest.join("SKILL.md"), target_name) {
+        // 改名失败不致命：内容已经保住，只是界面里可能合并显示
+        log::warn!("改写 {target_name} 的 frontmatter name 失败: {e}");
+    }
+    Ok(dest)
+}
+
+/// 把 SKILL.md frontmatter 里的 `name:` 改成指定值
+fn rewrite_frontmatter_name(skill_md: &Path, new_name: &str) -> Result<()> {
+    let raw = std::fs::read_to_string(skill_md)?;
+    let text = raw.trim_start_matches('\u{feff}');
+    if !text.starts_with("---") {
+        bail!("没有 frontmatter，跳过");
+    }
+    let after = &text[3..];
+    let Some(close) = after.find("\n---") else {
+        bail!("frontmatter 未闭合，跳过");
+    };
+    let fm = &after[..close];
+    let body = &after[close + 4..];
+
+    let mut replaced = false;
+    let lines: Vec<String> = fm
+        .lines()
+        .map(|line| {
+            // 只替换顶层 name，不碰 metadata 里的同名键
+            let is_top_level = !line.starts_with(' ') && !line.starts_with('\t');
+            if is_top_level && line.split_once(':').map(|(k, _)| k.trim()) == Some("name") {
+                replaced = true;
+                format!("name: {new_name}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !replaced {
+        bail!("frontmatter 里没有 name，跳过");
+    }
+    std::fs::write(
+        skill_md,
+        format!("---\n{}\n---\n{}", lines.join("\n"), body),
+    )?;
+    Ok(())
 }
 
 /// 一个已暂存、等待替换的目标
@@ -492,11 +647,20 @@ pub fn local_hash(_tool: ToolKind, target_path: &str) -> Result<String> {
 
 /// 递归复制目录
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    copy_dir_recursive_skipping(src, dst, &[])
+}
+
+/// 复制目录，跳过顶层指定的文件名（用于排除 meta.json 这类元数据）
+fn copy_dir_recursive_skipping(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let name = entry.file_name();
+        if skip.iter().any(|s| name.to_string_lossy() == *s) {
+            continue;
+        }
         let from = entry.path();
-        let to = dst.join(entry.file_name());
+        let to = dst.join(&name);
         if from.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {

@@ -28,6 +28,12 @@ pub struct InstalledSkill {
     pub source: SkillSource,
     /// 安装时间（Unix 秒）
     pub installed_at: i64,
+    /// 用户选择「保留我的」时记下的远端哈希
+    ///
+    /// 用它只抑制提示，不改变真实状态：本地确实和安装时不一样，
+    /// 强行改成「最新」就是 #21 修掉的那种谎报。远端哈希再变时该值自动失效。
+    #[serde(default)]
+    pub ignored_remote_hash: Option<String>,
 }
 
 /// 安装方式
