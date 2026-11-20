@@ -96,6 +96,7 @@ pub mod hash;
 pub mod install;
 pub mod publish;
 pub mod scan;
+pub mod skill_error;
 pub mod skill_lock;
 pub mod state;
 pub mod storage;

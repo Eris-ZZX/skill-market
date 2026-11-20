@@ -50,6 +50,14 @@ fn lock<'a>(s: &'a State<'_, AppState>) -> Result<std::sync::MutexGuard<'a, Pers
     s.inner.lock().map_err(|_| "状态锁已损坏".to_string())
 }
 
+/// 把底层错误转成前端的结构化 JSON 字符串
+///
+/// 四个高频命令（安装/更新/卸载/纳管）统一走这里，让用户看到中文原因
+/// 而不是 `os error 10061` 这类原始报错。
+fn api_err<E: std::fmt::Display>(e: E) -> String {
+    crate::skill_error::error_json(e)
+}
+
 /// 状态文件的健康提示；None 表示一切正常
 #[tauri::command]
 pub fn state_health(state: State<'_, AppState>) -> Option<String> {
@@ -336,7 +344,7 @@ pub fn adopt_skill(
         return Err(format!("{} 已存在于 {} 的安装记录中", rec.name, rec.tool));
     }
     guard.installs.push(rec.clone());
-    crate::storage::save(&guard).map_err(|e| e.to_string())?;
+    crate::storage::save(&guard).map_err(api_err)?;
     Ok(rec)
 }
 
@@ -352,8 +360,11 @@ pub struct InstallOutcomeView {
 #[serde(rename_all = "camelCase")]
 pub struct InstallFailureView {
     pub tool: String,
+    /// 稳定错误码，前端据此映射文案与动作
+    pub code: String,
     pub message: String,
     pub detail: String,
+    pub action: Option<String>,
     pub retryable: bool,
 }
 
@@ -364,11 +375,18 @@ impl From<crate::install::InstallOutcome> for InstallOutcomeView {
             failed: o
                 .failed
                 .into_iter()
-                .map(|f| InstallFailureView {
-                    tool: f.tool,
-                    message: f.message,
-                    detail: f.detail,
-                    retryable: f.retryable,
+                .map(|f| {
+                    // 分类基于原始 detail，而不是 install 层那句概括性 message——
+                    // 后者已经把具体原因抹平了，分类不准
+                    let e = crate::skill_error::classify(&f.detail);
+                    InstallFailureView {
+                        tool: f.tool,
+                        code: e.code,
+                        message: format!("{}：{}", e.message, f.message),
+                        detail: f.detail,
+                        action: e.action,
+                        retryable: f.retryable,
+                    }
                 })
                 .collect(),
         }
@@ -395,7 +413,7 @@ pub async fn install_skill(
         )
     };
 
-    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let library_root = crate::storage::library_dir().map_err(api_err)?;
 
     // 每个工具成功就立刻落盘：这样即使后面的工具失败，前面装的也不会成为孤儿
     let outcome = crate::commands::market::install_from_repo(
@@ -419,7 +437,7 @@ pub async fn install_skill(
         },
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(api_err)?;
 
     Ok(InstallOutcomeView::from(outcome))
 }
@@ -449,7 +467,7 @@ pub fn validate_update_preflight(
     }
 
     // 后面所有路径都用 name 拼，校验必须在此之前
-    crate::install::require_valid_directory(name).map_err(|e| e.to_string())?;
+    crate::install::require_valid_directory(name).map_err(api_err)?;
 
     let Some(local_hash) = local_hash else {
         return Err("本地技能目录不存在，无法判断是否有改动".to_string());
@@ -509,18 +527,23 @@ pub async fn update_skill(
     //
     // 算哈希必须持读锁：否则另一端正在替换文件时可能读到半截内容，
     // 算出一个既不是旧版也不是新版的哈希，然后误判成「本地已修改」
-    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let library_root = crate::storage::library_dir().map_err(api_err)?;
     let local_hash = {
         let _read = crate::skill_lock::read_guard();
         crate::hash::hash_dir(&library_root.join(&name)).ok()
     };
-    let target_rec =
-        validate_update_preflight(&name, &tool, &snapshot, local_hash.as_deref())?;
+    let target_rec = validate_update_preflight(&name, &tool, &snapshot, local_hash.as_deref())
+        .map_err(|e| {
+            // preflight 返回的是纯文本，这里按同样规则归类后再给前端
+            crate::skill_error::error_json(e)
+        })?;
     let repo_path = target_rec
         .source
         .repo_path
         .clone()
-        .ok_or_else(|| "本地导入的技能无法更新（没有远端来源）".to_string())?;
+        .ok_or_else(|| {
+            crate::skill_error::error_json("本地导入的技能无法更新（没有远端来源）")
+        })?;
 
     // 5. 下载新版本到临时目录（客户端已有 60 秒传输层超时）
     //    下载阶段不持写锁：几十秒的耗时操作不该堵住整个应用
@@ -531,7 +554,7 @@ pub async fn update_skill(
 
     let downloaded = crate::commands::market::download_skill_package(cfg, &repo_path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(api_err)?;
 
     // 从这里开始全是同步的本地写操作，持写锁直到记录写完
     let _write = crate::skill_lock::write_guard();
@@ -566,7 +589,7 @@ pub async fn update_skill(
     // 8-9. 替换库并按记录各自的 mode 处理工具目录
     let (new_hash, new_version) =
         crate::commands::market::deploy_downloaded(&downloaded, &name, &targets, &library_root)
-            .map_err(|e| e.to_string())?;
+            .map_err(api_err)?;
 
     // 10. 同名技能可能装在多个工具，库只有一份，全部记录一起更新
     let mut updated = None;
@@ -581,10 +604,10 @@ pub async fn update_skill(
                 updated = Some(rec.clone());
             }
         }
-        crate::storage::save(&guard).map_err(|e| e.to_string())?;
+        crate::storage::save(&guard).map_err(api_err)?;
     }
 
-    updated.ok_or_else(|| "更新后找不到记录".to_string())
+    updated.ok_or_else(|| crate::skill_error::error_json("更新后找不到记录"))
 }
 
 /// 处理「本地改过」与「本地改过 + 远端也改」两种状态
@@ -796,11 +819,11 @@ pub fn uninstall_skill(
     let _guard = crate::skill_lock::write_guard();
 
     let kind = ToolKind::from_key(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
-    crate::install::uninstall(kind, &name).map_err(|e| e.to_string())?;
+    crate::install::uninstall(kind, &name).map_err(api_err)?;
 
     let mut guard = lock(&state)?;
     guard.installs.retain(|x| !(x.name == name && x.tool == tool));
-    crate::storage::save(&guard).map_err(|e| e.to_string())?;
+    crate::storage::save(&guard).map_err(api_err)?;
     Ok(())
 }
 

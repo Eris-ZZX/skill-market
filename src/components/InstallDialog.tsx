@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ErrorBanner from "./ErrorBanner";
 import {
   api,
   INSTALL_MODE_LABEL,
@@ -206,8 +207,8 @@ export default function InstallDialog({
           )}
 
           {error && (
-            <div className="banner error" style={{ marginBottom: 0 }}>
-              {error}
+            <div style={{ marginBottom: 0 }}>
+              <ErrorBanner error={error} />
               {needCreateDir && (
                 <div style={{ marginTop: 8 }}>
                   <button

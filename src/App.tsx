@@ -130,6 +130,7 @@ export default function App() {
             onRefreshUpdates={setUpdates}
             items={items}
             onItemsChange={setItems}
+            onNavigateSettings={() => setTab("settings")}
           />
         )}
         {tab === "publish" && (
