@@ -29,12 +29,25 @@ fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
     }
 }
 
+
+/// 构造一个落盘位置
+fn spot(tool: &str, path: &str, is_link: bool, link: Option<&str>) -> skill_market_lib::scan::SkillPlacement {
+    skill_market_lib::scan::SkillPlacement {
+        tool: tool.into(),
+        target_path: path.into(),
+        is_link,
+        link_target: link.map(|s| s.to_string()),
+    }
+}
+
 fn scanned(name: &str, tool: &str, target: &str, is_link: bool, link: Option<&str>) -> ScannedSkill {
     ScannedSkill {
         name: name.into(),
         dir_name: name.into(),
         tool: tool.into(),
         target_path: target.into(),
+        found_in: vec![tool.into()],
+        placements: vec![spot(tool, target, is_link, link)],
         description: format!("{name} 的描述"),
         version: Some("1.0.0".into()),
         tags: Vec::new(),
@@ -127,15 +140,21 @@ fn 软链但读不到目标是_external() {
 }
 
 #[test]
-fn 按名聚合时取最高优先级身份() {
-    let list = vec![
-        // 同一个技能装在两个工具下：一个本地、一个外部软链
-        scanned("grill-me", "agents", "/a/grill-me", false, None),
-        scanned("grill-me", "claude", "/c/grill-me", true, Some("/x/grill-me")),
+fn 按目录聚合后取最高优先级身份() {
+    // scan_dirs 已按 dir_name 聚合：一个技能一条，placements 里是全部落盘。
+    // 这里直接构造聚合后的形态，验证身份仍取最高优先级。
+    let mut item = scanned("grill-me", "agents", "/a/grill-me", false, None);
+    item.placements = vec![
+        spot("agents", "/a/grill-me", false, None),
+        // claude 那处是外部软链
+        spot("claude", "/c/grill-me", true, Some("/x/grill-me")),
     ];
-    let got = build_my_skills(&list, &[], Some(APP_DATA));
-    assert_eq!(got.len(), 1, "同名技能应聚合成一行");
+    item.found_in = vec!["agents".into(), "claude".into()];
+
+    let got = build_my_skills(&[item], &[], Some(APP_DATA));
+    assert_eq!(got.len(), 1, "聚合后一个技能一条");
     assert_eq!(got[0].tools.len(), 2);
+    // /c 是非本应用的软链目标 → external 高于 /a 的 local
     assert_eq!(got[0].identity, "external", "external 高于 local");
 }
 
@@ -143,11 +162,15 @@ fn 按名聚合时取最高优先级身份() {
 fn managed_聚合后带出已记录版本() {
     let mut r = rec("grill-me", "claude", "/c/grill-me");
     r.installed_version = Some("0.9.0".into());
-    let list = vec![
-        scanned("grill-me", "claude", "/c/grill-me", false, None),
-        scanned("grill-me", "agents", "/a/grill-me", false, None),
+    // 聚合后的形态：一条记录、两个落盘
+    let mut item = scanned("grill-me", "claude", "/c/grill-me", false, None);
+    item.placements = vec![
+        spot("claude", "/c/grill-me", false, None),
+        spot("agents", "/a/grill-me", false, None),
     ];
-    let got = build_my_skills(&list, &[r], Some(APP_DATA));
+    item.found_in = vec!["claude".into(), "agents".into()];
+
+    let got = build_my_skills(&[item], &[r], Some(APP_DATA));
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].identity, "managed");
     assert_eq!(got[0].installed_version.as_deref(), Some("0.9.0"));

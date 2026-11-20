@@ -155,12 +155,26 @@ export interface Snapshot {
 export interface ScannedSkill {
   name: string;
   dirName: string;
+  /** 首个落盘的工具（完整列表见 placements） */
   tool: string;
+  /** 首个落盘的路径（完整列表见 placements） */
   targetPath: string;
+  /** 在哪些工具的目录下发现 */
+  foundIn: string[];
+  /** 每个落盘的完整信息 */
+  placements: ScannedSkillPlacement[];
   description: string;
   version: string | null;
   tags: string[];
   category: string | null;
+  isLink: boolean;
+  linkTarget: string | null;
+}
+
+/** 一个落盘位置 */
+export interface ScannedSkillPlacement {
+  tool: string;
+  targetPath: string;
   isLink: boolean;
   linkTarget: string | null;
 }
