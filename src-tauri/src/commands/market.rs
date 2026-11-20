@@ -228,26 +228,16 @@ pub async fn install_from_repo(
         .map(|k| ToolKind::from_key(k).ok_or_else(|| anyhow::anyhow!("未知工具: {k}")))
         .collect::<Result<_>>()?;
 
-    let client = GitLabClient::new(cfg.clone())?;
-    let head = client.head_commit().await?;
-    let zip_bytes = client.download_skill_zip(repo_path, &head).await?;
+    // 下载与解压都在临时目录里，不碰技能目录也不碰 state.json，
+    // 所以这一段不持锁——否则一个几十秒的下载会堵住整个应用
+    let dl = crate::commands::market::download_skill_package(cfg.clone(), repo_path).await?;
 
-    // 解压到临时目录
-    let tmp = tempfile::tempdir()?;
-    extract_zip(&zip_bytes, tmp.path())?;
-
-    // GitLab 归档带一层 `repo-branch-sha/`，剥掉
-    let extracted = find_skill_dir(tmp.path())?;
-
-    // 从实际文件解析版本号 —— 之前这里传了 None，导致 state.json 里
-    // installedVersion 永远为空，界面上看不到版本。必须从 SKILL.md 读。
-    let version = crate::frontmatter::SkillMeta::from_dir(&extracted)
-        .ok()
-        .and_then(|m| m.version);
+    // 从这里开始全是同步的本地写操作，持写锁直到整批装完
+    let _guard = crate::skill_lock::write_guard();
 
     install::install_each_tool(
         name,
-        &extracted,
+        &dl.extracted,
         mode,
         &kinds,
         SkillSource {
@@ -259,9 +249,9 @@ pub async fn install_from_repo(
             )),
             repo_path: Some(repo_path.to_string()),
             branch: Some(cfg.branch.clone()),
-            commit: Some(head.clone()),
+            commit: Some(dl.commit.clone()),
         },
-        version,
+        dl.version.clone(),
         allow_create_skills_dir,
         library_root,
         // R1：根目录不存在就是「工具未安装」，绝不创建
