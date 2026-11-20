@@ -54,10 +54,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 # --- 归档解压（技能包）---
 zip = "2.2"
 
-[dev-dependencies]
-# 只给集成测试用：mock_app 让我们能构造 tauri::State 去测命令层守卫
-tauri = { version = "2.8.2", features = ["test"] }
-
 [features]
 default = []
 

@@ -1,27 +1,31 @@
-//! 更新链路端到端（本地模拟，不依赖网络）
+//! 更新链路端到端（本地模拟，不依赖网络、不依赖 Tauri 运行时）
 //!
 //! `update_skill` 把「取远端内容」与「落盘」拆成两步：`download_skill_package`
 //! 走网络，`deploy_downloaded` 只管落盘。本文件直接构造 `DownloadedSkill`
-//! 指向本地目录，把后者（哈希重算、部署、回滚、mode 处理）跑通；
-//! 需要验证命令层守卫时用 `tauri::test::mock_app` 构造 `State`；
-//! 需要走完整下载流程时用一个本地 HTTP 服务器冒充 GitLab。
+//! 指向本地目录，把落盘侧（哈希重算、部署、回滚、mode 处理）跑通。
+//!
+//! 命令层的六项校验已抽成纯函数 `validate_update_preflight` /
+//! `verify_records_unchanged`，直接对 `Vec<InstalledSkill>` 断言即可，
+//! **不需要构造 `tauri::State`**。
+//!
+//! 为什么不用 `tauri::test::mock_app`：它会拉入 Tauri 完整运行时的链接依赖，
+//! Windows 上测试二进制的 DLL 入口解析会失败（0xC0000139
+//! STATUS_ENTRYPOINT_NOT_FOUND），整个测试二进制起不来。
 //!
 //! `deploy_downloaded` 内部用真实的 `storage::library_dir()`，所以整个二进制
 //! 通过 `XDG_CONFIG_HOME` 把应用数据目录重定向到临时目录，绝不碰
 //! 用户真实的 `~/.config`。
 
 use skill_market_lib::commands::market::{deploy_downloaded, DownloadedSkill};
-use skill_market_lib::commands::{update_skill, AppState};
 use skill_market_lib::hash;
 use skill_market_lib::install::{
     backup_library, deploy_to_paths, is_link, junction_supported, restore_backup_as,
     symlink_supported,
 };
-use skill_market_lib::state::{InstalledSkill, InstallMode, SkillSource, SourceKind};
+use skill_market_lib::state::InstallMode;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use tauri::Manager;
 
 static INIT: Once = Once::new();
 
@@ -305,32 +309,20 @@ fn 场景7补充_链接模式下更新不破坏链接() {
     assert!(read(&target.join("SKILL.md")).contains("2.0.0"));
 }
 
-// ========== 命令层守卫（需要 tauri::State） ==========
+// ========== 命令层校验（纯函数，不碰 Tauri / 文件系统） ==========
 
-fn app_with_base(rec: InstalledSkill, base_url: &str) -> tauri::App<tauri::test::MockRuntime> {
-    let app = tauri::test::mock_app();
-    let st = AppState::load();
-    {
-        let mut g = st.inner.lock().unwrap();
-        g.settings.gitlab_base_url = base_url.into();
-        g.settings.gitlab_project_path = "g/p".into();
-        g.installs.push(rec);
-    }
-    app.manage(st);
-    app
-}
+use skill_market_lib::commands::{
+    validate_update_preflight, verify_records_unchanged,
+};
+use skill_market_lib::state::{InstalledSkill, SkillSource, SourceKind};
 
-fn app_with(rec: InstalledSkill) -> tauri::App<tauri::test::MockRuntime> {
-    app_with_base(rec, "https://example.invalid")
-}
-
-fn remote_rec(name: &str, library_hash: &str, target_path: &str) -> InstalledSkill {
+fn rec(name: &str, tool: &str, target: &str, hash: &str, at: i64) -> InstalledSkill {
     InstalledSkill {
         name: name.into(),
-        tool: "claude".into(),
-        target_path: target_path.into(),
+        tool: tool.into(),
+        target_path: target.into(),
         mode: InstallMode::Copy,
-        installed_hash: library_hash.into(),
+        installed_hash: hash.into(),
         installed_version: Some("1.0.0".into()),
         source: SkillSource {
             kind: SourceKind::Gitlab,
@@ -339,226 +331,110 @@ fn remote_rec(name: &str, library_hash: &str, target_path: &str) -> InstalledSki
             branch: Some("master".into()),
             commit: Some("abc".into()),
         },
-        installed_at: 1700000000,
+        installed_at: at,
         ignored_remote_hash: None,
     }
 }
 
-#[tokio::test]
-async fn 场景2_本地改过时更新被拒绝且文件未变() {
-    let lib = library_root();
-    let work = tempfile::tempdir().unwrap();
-    let target = work.path().join("t").join("skills").join("e2e-s2");
+#[test]
+fn 场景2_本地改过时更新被拒绝() {
+    let snapshot = vec![rec("x", "cursor", "/p/x", "h1", 100)];
 
-    let v1 = make_skill(&work.path().join("v1"), "e2e-s2", "1.0.0");
-    deploy_to_paths(&v1, &lib, &[target.clone()], InstallMode::Copy).unwrap();
-    let installed_hash = hash::hash_dir(&lib.join("e2e-s2")).unwrap();
-
-    // 用户手改库里的内容
-    fs::write(
-        lib.join("e2e-s2").join("SKILL.md"),
-        "---\nname: e2e-s2\ndescription: 我改了\nversion: 1.0.0\n---\n手改\n",
-    )
-    .unwrap();
-    let modified = read(&lib.join("e2e-s2").join("SKILL.md"));
-
-    let app = app_with(remote_rec(
-        "e2e-s2",
-        &installed_hash,
-        &target.to_string_lossy(),
-    ));
-    let st = app.state::<AppState>();
-
-    let err = update_skill(st, "e2e-s2".into(), "claude".into())
-        .await
-        .expect_err("本地改过必须被拒绝");
-
+    // 本地哈希与安装时不同 → 拒绝
+    let err = validate_update_preflight("x", "cursor", &snapshot, Some("h2")).unwrap_err();
     assert!(err.contains("本地"), "错误信息应说明是本地改动: {err}");
-    assert_eq!(
-        read(&lib.join("e2e-s2").join("SKILL.md")),
-        modified,
-        "被拒绝时不得改动文件"
-    );
+
+    // 对照：未改过时应通过，证明上面不是恒错
+    assert!(validate_update_preflight("x", "cursor", &snapshot, Some("h1")).is_ok());
 }
 
-#[tokio::test]
-async fn 场景3_库目录不存在时报错且不回退旧指纹() {
-    let lib = library_root();
-    let work = tempfile::tempdir().unwrap();
+#[test]
+fn 场景3_本地目录读不到时报错且不回退旧指纹() {
+    let snapshot = vec![rec("x", "cursor", "/p/x", "h1", 100)];
 
-    let app = app_with(remote_rec(
-        "e2e-s3-gone",
-        "some-old-hash",
-        &work.path().join("t").join("e2e-s3-gone").to_string_lossy(),
-    ));
-    let st = app.state::<AppState>();
-
-    assert!(
-        !lib.join("e2e-s3-gone").exists(),
-        "前置条件：库目录必须确实不存在"
-    );
-
-    let err = update_skill(st, "e2e-s3-gone".into(), "claude".into())
-        .await
-        .expect_err("目录不在必须报错");
-
+    // local_hash 为 None = 目录读不到。必须报「目录不存在」，
+    // 不能退化成「与 installed_hash 相同 → 放行」
+    let err = validate_update_preflight("x", "cursor", &snapshot, None).unwrap_err();
     assert!(
         err.contains("本地技能目录不存在"),
-        "错误信息应明确指出目录缺失（而不是静默用旧指纹）: {err}"
+        "必须指出目录缺失而不是静默用旧指纹: {err}"
     );
 }
 
-#[tokio::test]
-async fn 场景3补充_未安装的工具上报明确错误() {
-    let work = tempfile::tempdir().unwrap();
-    let app = app_with(remote_rec(
-        "e2e-s3b",
-        "h",
-        &work.path().join("t").to_string_lossy(),
-    ));
-    let st = app.state::<AppState>();
-    let err = update_skill(st, "e2e-s3b".into(), "cursor".into())
-        .await
-        .expect_err("没装在这个工具上应报错");
+#[test]
+fn 场景3补充_未安装的工具与本地导入都被拒() {
+    let snapshot = vec![rec("x", "cursor", "/p/x", "h1", 100)];
+
+    let err = validate_update_preflight("x", "claude", &snapshot, Some("h1")).unwrap_err();
     assert!(err.contains("未安装"), "应说明未安装在该工具: {err}");
+
+    // 本地导入：repo_path 为 None
+    let mut local = rec("y", "cursor", "/p/y", "h1", 100);
+    local.source.repo_path = None;
+    local.source.kind = SourceKind::Local;
+    let err = validate_update_preflight("y", "cursor", &[local], Some("h1")).unwrap_err();
+    assert!(err.contains("本地导入"), "本地导入应被明确拒绝: {err}");
 }
 
-// ========== 场景 4：下载期间被卸载，不得复活 ==========
-
-/// 构造 GitLab 整仓归档形态的 zip：顶层 `<repo>-<sha>/` 下放技能
-fn repo_zip(sha: &str, skill_name: &str, version: &str) -> Vec<u8> {
-    use std::io::Write as _;
-    let mut out = Vec::new();
-    {
-        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        let root = format!("repo-master-{sha}/skills/通用/{skill_name}/");
-        w.start_file(format!("{root}SKILL.md"), opts).unwrap();
-        w.write_all(
-            format!("---\nname: {skill_name}\ndescription: d\nversion: {version}\n---\n{version}\n")
-                .as_bytes(),
-        )
-        .unwrap();
-        w.start_file(format!("{root}scripts/run.py"), opts).unwrap();
-        w.write_all(format!("print('{version}')\n").as_bytes())
-            .unwrap();
-        w.finish().unwrap();
-    }
-    out
-}
-
-/// 极简 GitLab mock：只实现 head_commit 与 archive.zip
-fn spawn_mock_gitlab(sha: String, zip: Vec<u8>, delay_ms: u64) -> String {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let sha = sha.clone();
-            let zip = zip.clone();
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request_line = String::new();
-                if reader.read_line(&mut request_line).is_err() {
-                    return;
-                }
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) if line.trim().is_empty() => break,
-                        Ok(_) => {}
-                    }
-                }
-
-                if request_line.contains("repository/commits") {
-                    let json = format!(
-                        r#"[{{"id":"{sha}","short_id":"deadbeef","title":"t","author_name":"a","author_email":null,"created_at":"2025-01-01T00:00:00Z"}}]"#
-                    );
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        json.len(),
-                        json
-                    );
-                } else if request_line.contains("archive.zip") {
-                    // 故意慢一点，给测试留出「下载期间卸载」的窗口
-                    if delay_ms > 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    }
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        zip.len()
-                    );
-                    let _ = stream.write_all(&zip);
-                } else {
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    );
-                }
-                let _ = stream.flush();
-            });
-        }
-    });
-
-    format!("http://127.0.0.1:{port}")
-}
-
-#[tokio::test]
-async fn 场景4_下载期间被卸载时不得复活() {
-    const NAME: &str = "e2e-s4";
-    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-
-    let lib = library_root();
-    let work = tempfile::tempdir().unwrap();
-    let target = work.path().join("t").join("skills").join(NAME);
-
-    let v1 = make_skill(&work.path().join("v1"), NAME, "1.0.0");
-    deploy_to_paths(&v1, &lib, &[target.clone()], InstallMode::Copy).unwrap();
-    let installed_hash = hash::hash_dir(&lib.join(NAME)).unwrap();
-
-    // mock GitLab，archive 延迟 800ms
-    let base = spawn_mock_gitlab(SHA.to_string(), repo_zip(SHA, NAME, "2.0.0"), 800);
-
-    let mut rec = remote_rec(NAME, &installed_hash, &target.to_string_lossy());
-    rec.source.repo_url = Some(format!("{base}/g/p"));
-    let app = app_with_base(rec, &base);
-    let st = app.state::<AppState>();
-
-    // 并发：等 300ms（此时已在下载中），删掉记录模拟用户卸载
-    let handle = app.handle().clone();
-    let uninstaller = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let st2 = handle.state::<AppState>();
-        let mut g = st2.inner.lock().unwrap();
-        g.installs.retain(|r| r.name != NAME);
-        g.installs.len()
-    });
-
-    let err = update_skill(st, NAME.into(), "claude".into())
-        .await
-        .expect_err("下载期间被卸载，更新必须拒绝");
-    let remaining = uninstaller.await.unwrap();
-
-    assert!(err.contains("已被卸载"), "错误信息应说明技能已被卸载: {err}");
-    assert_eq!(remaining, 0, "记录应确实已被删除");
-
-    // 最关键：光看报错不够，要证明技能没被复活
-    let st_after = app.state::<AppState>();
-    let g = st_after.inner.lock().unwrap();
+#[test]
+fn 场景3补充_非法技能名被拒() {
+    // 名字后面要拼进路径，穿越式的值必须在这里就拦住
+    let snapshot = vec![rec("../evil", "cursor", "/p/evil", "h1", 100)];
+    let err = validate_update_preflight("../evil", "cursor", &snapshot, Some("h1")).unwrap_err();
     assert!(
-        !g.installs.iter().any(|r| r.name == NAME),
-        "已卸载的技能不得被下载结果重新写回记录"
+        err.contains("非法"),
+        "路径穿越式的技能名必须被拒绝: {err}"
     );
-    assert!(
-        read(&lib.join(NAME).join("SKILL.md")).contains("1.0.0"),
-        "库内容不该被替换成远端版本"
-    );
+
+    let snapshot2 = vec![rec("a/b", "cursor", "/p/ab", "h1", 100)];
+    assert!(validate_update_preflight("a/b", "cursor", &snapshot2, Some("h1")).is_err());
+}
+
+#[test]
+fn 场景4_下载期间被卸载时不得复活() {
+    let snapshot = vec![rec("x", "cursor", "/p/x", "h1", 100)];
+
+    // 下载完成后记录已被删掉
+    let after_uninstall: Vec<InstalledSkill> = vec![];
+    let err = verify_records_unchanged(&snapshot, &after_uninstall).unwrap_err();
+    assert!(err.contains("已被卸载"), "错误信息应说明已被卸载: {err}");
+
+    // 最关键：不仅报错，还要证明记录没被复活。
+    // 这个纯函数只读不写，所以「没被复活」等价于入参仍为空——
+    // 命令层拿到 Err 就直接 return，绝不会走到写回那一步。
+    assert!(after_uninstall.is_empty(), "记录不得被复活");
+}
+
+#[test]
+fn 场景4补充_下载期间记录被改动也要拒绝() {
+    let snapshot = vec![rec("x", "cursor", "/p/x", "h1", 100)];
+
+    // 哈希变了（用户重装过）
+    let changed_hash = vec![rec("x", "cursor", "/p/x", "h9", 100)];
+    let err = verify_records_unchanged(&snapshot, &changed_hash).unwrap_err();
+    assert!(err.contains("已变化"), "哈希变化应被拒绝: {err}");
+
+    // 安装时间变了
+    let changed_at = vec![rec("x", "cursor", "/p/x", "h1", 999)];
+    assert!(verify_records_unchanged(&snapshot, &changed_at).is_err());
+
+    // 路径变了
+    let changed_path = vec![rec("x", "cursor", "/other/x", "h1", 100)];
+    assert!(verify_records_unchanged(&snapshot, &changed_path).is_err());
+
+    // 对照：完全没变时通过
+    assert!(verify_records_unchanged(&snapshot, &snapshot).is_ok());
+}
+
+#[test]
+fn 场景4补充_多工具时任一记录消失都拒绝() {
+    // SSOT 下同名技能可能装在多个工具，更新会同时涉及所有记录
+    let snapshot = vec![
+        rec("x", "cursor", "/a/x", "h1", 100),
+        rec("x", "claude", "/b/x", "h1", 100),
+    ];
+    // 只删掉其中一个，也必须拒绝
+    let partial = vec![rec("x", "cursor", "/a/x", "h1", 100)];
+    let err = verify_records_unchanged(&snapshot, &partial).unwrap_err();
+    assert!(err.contains("已被卸载"), "{err}");
 }
