@@ -744,6 +744,122 @@ pub struct UpdateCheckItem {
     pub ignored: bool,
 }
 
+/// 一次「检查更新」的完整结果
+///
+/// 远端读取失败时不能整体返回 Err——那样界面上连上次的数据都看不到。
+/// 失败放进 `failures` 带回去，已缓存的结果照常返回。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub items: Vec<UpdateCheckItem>,
+    pub failures: Vec<RemoteFailure>,
+}
+
+/// 远端读取失败的一条记录
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFailure {
+    /// network | auth | notfound | parse | config
+    pub kind: String,
+    /// 用户可读的中文原因
+    pub message: String,
+    /// 原始技术信息，供排查
+    pub detail: String,
+}
+
+/// 把底层错误归类
+///
+/// 分类只影响文案，不影响任何判定逻辑，所以按特征字符串粗分即可，
+/// 不追求精确。认不出来就归为 parse——那至少说明是数据层面的问题。
+pub fn classify_remote_failure(detail: &str) -> RemoteFailure {
+    let lower = detail.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+
+    let (kind, message) = if has(&[
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "token",
+        "令牌",
+        "权限",
+    ]) {
+        ("auth", "访问令牌无效或权限不足")
+    } else if has(&["404", "not found", "notfound", "不存在"]) {
+        ("notfound", "仓库不存在，请检查项目路径")
+    } else if has(&[
+        "timeout",
+        "timed out",
+        "超时",
+        "connect",
+        "connection",
+        "dns",
+        "network",
+    ]) {
+        ("network", "无法连接到 GitLab")
+    } else {
+        ("parse", "仓库数据解析失败")
+    };
+
+    RemoteFailure {
+        kind: kind.to_string(),
+        message: message.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// 组装一次检查结果
+///
+/// `remote` 为 None 表示远端读取失败；此时用 `cached` 兜底。
+/// 纯函数：不碰网络、不碰 Tauri，方便直接测两条路径。
+pub fn assemble_update_result(
+    snapshot: &[InstalledSkill],
+    remote: Option<&[RemoteSkillView]>,
+    cached: &[RemoteSkillView],
+    failure: Option<RemoteFailure>,
+    local_hash_of: impl Fn(&InstalledSkill) -> Option<String>,
+) -> UpdateCheckResult {
+    // 有远端就用远端；失败时退回缓存（可能是空的）
+    let source: &[RemoteSkillView] = remote.unwrap_or(cached);
+
+    let mut items = Vec::with_capacity(snapshot.len());
+    for rec in snapshot {
+        let local = local_hash_of(rec);
+
+        let hit = find_remote(&rec.name, rec.source.repo_path.as_deref(), source);
+        let remote_hash = hit.map(|r| r.hash.clone());
+        let remote_version = hit.and_then(|r| r.version.clone());
+
+        // 本地导入的技能没有远端可比，不参与远端缺失判定
+        let status = if rec.source.repo_path.is_none() {
+            UpdateStatus::UpToDate
+        } else {
+            judge_record(&rec.installed_hash, local.as_deref(), remote_hash.as_deref())
+        };
+
+        // 忽略标记只抑制提示，不改状态：本地确实还和安装时不同。
+        // 远端哈希再变时该标记自然失效（比较的是哈希相等，不是「有过标记」）。
+        let ignored = match (&rec.ignored_remote_hash, &remote_hash) {
+            (Some(seen), Some(now)) => seen == now,
+            _ => false,
+        };
+
+        items.push(UpdateCheckItem {
+            name: rec.name.clone(),
+            tool: rec.tool.clone(),
+            status,
+            installed_version: rec.installed_version.clone(),
+            remote_version,
+            ignored,
+        });
+    }
+
+    UpdateCheckResult {
+        items,
+        failures: failure.into_iter().collect(),
+    }
+}
+
 /// 在远端索引里找与某条安装记录对应的技能
 ///
 /// 必须同时比对 `name` 与 `repo_path`：同名技能可能同时存在于
@@ -766,52 +882,43 @@ pub fn find_remote<'a>(
 /// 配置缺失和网络失败都返回 Err：把「连不上」伪装成「远端已删除」
 /// 会把人引向保留本地版本，这比直接报错更危险。
 #[tauri::command]
-pub async fn check_updates(state: State<'_, AppState>) -> Result<Vec<UpdateCheckItem>, String> {
+pub async fn check_updates(state: State<'_, AppState>) -> Result<UpdateCheckResult, String> {
     let cfg = {
         let guard = lock(&state)?;
+        // 配置缺失是配置问题，不是读取失败——照旧返回 Err 让用户去设置页
         build_gitlab_config(&guard.settings)?
     };
 
-    let remote = crate::commands::market::fetch_index(cfg)
-        .await
-        .map_err(|e| format!("无法获取远端技能索引：{e}"))?;
+    // 远端读取失败不让整个操作失败：退回上次缓存，把失败原因带回去
+    let (remote, failure) = match crate::commands::market::fetch_index(cfg).await {
+        Ok(list) => (Some(list), None),
+        Err(e) => {
+            log::warn!("获取远端索引失败，将退回缓存: {e}");
+            (None, Some(classify_remote_failure(&e.to_string())))
+        }
+    };
 
-    let guard = lock(&state)?;
-    let mut out = Vec::new();
-    for rec in &guard.installs {
-        // 读不到就如实传 None，绝不回退到安装时的旧指纹——
-        // 否则目录被删或被占用会被误判成「本地没改」，更新时可能覆盖用户手改
-        let local = ToolKind::from_key(&rec.tool)
-            .and_then(|k| crate::install::local_hash(k, &rec.target_path).ok());
+    let cached = if remote.is_none() {
+        // 缓存读不出来也不能当作「远端没有技能」：那样会把每条记录判成
+        // 「远端已删除」。这里退化成空切片 + 已有的 failure 提示。
+        crate::commands::market::load_cached_index().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
-        let hit = find_remote(&rec.name, rec.source.repo_path.as_deref(), &remote);
-        let remote_hash = hit.map(|r| r.hash.clone());
-        let remote_version = hit.and_then(|r| r.version.clone());
-
-        // 本地导入的技能没有远端可比，不参与远端缺失判定
-        let status = if rec.source.repo_path.is_none() {
-            UpdateStatus::UpToDate
-        } else {
-            judge_record(&rec.installed_hash, local.as_deref(), remote_hash.as_deref())
-        };
-
-        // 忽略标记只抑制提示，不改状态：本地确实还和安装时不同。
-        // 远端哈希再变时该标记自然失效（比较的是哈希相等，不是「有过标记」）。
-        let ignored = match (&rec.ignored_remote_hash, &remote_hash) {
-            (Some(seen), Some(now)) => seen == now,
-            _ => false,
-        };
-
-        out.push(UpdateCheckItem {
-            name: rec.name.clone(),
-            tool: rec.tool.clone(),
-            status,
-            installed_version: rec.installed_version.clone(),
-            remote_version,
-            ignored,
-        });
-    }
-    Ok(out)
+    let snapshot = lock(&state)?.installs.clone();
+    Ok(assemble_update_result(
+        &snapshot,
+        remote.as_deref(),
+        &cached,
+        failure,
+        |rec| {
+            // 读不到就如实传 None，绝不回退到安装时的旧指纹——
+            // 否则目录被删或被占用会被误判成「本地没改」，更新时可能覆盖用户手改
+            ToolKind::from_key(&rec.tool)
+                .and_then(|k| crate::install::local_hash(k, &rec.target_path).ok())
+        },
+    ))
 }
 
 // ========== 发布 / 历史 / 回滚 ==========
