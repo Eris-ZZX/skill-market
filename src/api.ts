@@ -190,6 +190,23 @@ export interface RestoreResult {
   pendingTool: boolean;
 }
 
+/** 一条转换项 */
+export interface MigrateItem {
+  name: string;
+  tool: string;
+  from: InstallMode;
+  to: InstallMode;
+}
+
+/** 批量转换同步方式的结果 */
+export interface MigrateReport {
+  migrated: MigrateItem[];
+  skipped: MigrateItem[];
+  skippedModified: MigrateItem[];
+  failed: { name: string; tool: string; message: string }[];
+  freedBytes: number;
+}
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
@@ -517,6 +534,8 @@ export const api = {
     invoke<void>("uninstall_skill", { name, tool }),
   checkUpdates: () => invoke<UpdateCheckResult>("check_updates"),
   resyncSkills: () => invoke<ResyncOutcome>("resync_skills"),
+  migrateSyncMethod: (target: InstallMode) =>
+    invoke<MigrateReport>("migrate_sync_method", { target }),
   listSkillBackups: () => invoke<SkillBackupEntry[]>("list_skill_backups"),
   restoreSkillBackup: (backupId: string) =>
     invoke<RestoreResult>("restore_skill_backup", { backupId }),
