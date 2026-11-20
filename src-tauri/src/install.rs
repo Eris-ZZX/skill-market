@@ -204,6 +204,182 @@ pub struct Deployment<'a> {
 ///
 /// 先把技能写进库，再为每个工具建链接或复制。多目标走「先全部准备、
 /// 再逐个替换、失败反向回滚」，避免装到一半留下混合状态。
+/// 一次安装的结果：逐工具独立成败
+#[derive(Debug, Clone)]
+pub struct InstallOutcome {
+    pub succeeded: Vec<InstalledSkill>,
+    pub failed: Vec<InstallFailure>,
+}
+
+/// 单工具安装失败
+#[derive(Debug, Clone)]
+pub struct InstallFailure {
+    pub tool: String,
+    /// 用户可读的原因
+    pub message: String,
+    /// 原始错误，排查用
+    pub detail: String,
+    /// 值不值得重试：占用/权限类可重试，未安装/已存在重试也没用
+    pub retryable: bool,
+}
+
+/// 把底层错误归类成用户能看懂的原因，并判断是否值得重试
+pub fn classify_install_failure(tool: &str, err: &str) -> InstallFailure {
+    let lower = err.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+
+    // 可重试：环境暂时性问题，稍后再试可能就好了
+    let (message, retryable) = if has(&[
+        "占用", "被锁", "locked", "in use", "os error 5", "os error 32", "denied", "拒绝访问",
+        "permission",
+    ]) {
+        ("目录被占用或没有写入权限，稍后可以重试", true)
+    } else if has(&["未安装", "不存在", "已存在同名", "请先卸载", "非法技能目录名"]) {
+        // 重试也不会变好：得先改环境或先卸载
+        ("目标工具未就绪（未安装 / 已有同名 / 名字非法）", false)
+    } else {
+        ("安装失败", false)
+    };
+
+    InstallFailure {
+        tool: tool.to_string(),
+        message: message.to_string(),
+        detail: err.to_string(),
+        retryable,
+    }
+}
+
+/// 逐工具安装，一个失败不影响其他
+///
+/// 库写入是共享前置：库写失败说明内容根本拿不到，所有工具都算失败。
+/// 库写成功后每个工具单独部署——这样才能做到「成功的立即记录，失败的单独报」，
+/// 不会因为一个工具失败就把已经落盘的其它工具变成孤儿。
+///
+/// `resolve_root` 决定每个工具的技能目录。生产代码传 `prepare_target`
+/// （内含 R1 的「根目录必须已存在」断言），测试传临时目录——这样测试
+/// 不会碰真实 home（#30 的教训：环境变量重定向在 Windows 上无效）。
+///
+/// `on_success` 在每个工具成功后立即调用，调用方借此把记录及时写进 state.json。
+#[allow(clippy::too_many_arguments)]
+pub fn install_each_tool(
+    name: &str,
+    source_dir: &Path,
+    mode: InstallMode,
+    tools: &[ToolKind],
+    source: SkillSource,
+    version: Option<String>,
+    allow_create_skills_dir: bool,
+    library_root: &Path,
+    mut resolve_root: impl FnMut(ToolKind) -> Result<PathBuf>,
+    mut on_success: impl FnMut(&InstalledSkill) -> Result<()>,
+) -> Result<InstallOutcome> {
+    if tools.is_empty() {
+        bail!("至少要选一个目标工具");
+    }
+    if !source_dir.join("SKILL.md").is_file() {
+        bail!("来源目录下没有 SKILL.md: {}", source_dir.display());
+    }
+    let dir_name = require_valid_directory(name)?;
+
+    // 库是共享前置：失败则全部失败（内容都没拿到，没什么可装的）
+    let ssot = prepare_library(source_dir, library_root, &dir_name)?;
+    let source_hash = hash::hash_dir(&ssot)?;
+
+    let mut outcome = InstallOutcome {
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+    };
+
+    for tool in tools {
+        match deploy_one(
+            *tool,
+            &dir_name,
+            &ssot,
+            mode,
+            allow_create_skills_dir,
+            &source_hash,
+            &mut resolve_root,
+        ) {
+            Ok(rec) => {
+                let mut rec = rec;
+                rec.installed_version = version.clone();
+                rec.source = source.clone();
+                // 立即上报，让调用方马上落盘——这是防孤儿的关键
+                if let Err(e) = on_success(&rec) {
+                    outcome.failed.push(classify_install_failure(
+                        tool.key(),
+                        &format!("安装成功但记录失败: {e}"),
+                    ));
+                    continue;
+                }
+                outcome.succeeded.push(rec);
+            }
+            Err(e) => outcome
+                .failed
+                .push(classify_install_failure(tool.key(), &e.to_string())),
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// 单工具部署
+fn deploy_one(
+    tool: ToolKind,
+    dir_name: &str,
+    ssot: &Path,
+    mode: InstallMode,
+    allow_create_skills_dir: bool,
+    source_hash: &str,
+    resolve_root: &mut impl FnMut(ToolKind) -> Result<PathBuf>,
+) -> Result<InstalledSkill> {
+    // R1 + R4：目标合法性先于任何写操作
+    let skills_root = resolve_root(tool)?;
+    let target = skills_root.join(dir_name);
+    assert_writable(tool, &target)?;
+    ensure_distinct_skill_roots(ssot, &skills_root, tool.display_name())?;
+
+    // allow_create_skills_dir 只对「生产环境的 prepare_target」有意义；
+    // 注入的 resolve_root 自己决定要不要建
+    let _ = allow_create_skills_dir;
+
+    let deployment = [Deployment {
+        tool,
+        target: target.as_path(),
+    }];
+    // 单目标也用 deploy_many：暂存 + 原子替换 + 失败回滚的语义一并保留
+    let used = deploy_many(ssot, &deployment, mode, DeployPolicy::MustBeEmpty)?;
+
+    let installed_hash = hash::hash_dir(&target).unwrap_or_else(|_| source_hash.to_string());
+    if installed_hash != source_hash {
+        log::warn!(
+            "安装后哈希不一致（源 {source_hash} vs 目标 {installed_hash}），可能存在换行符转换"
+        );
+    }
+
+    Ok(InstalledSkill {
+        name: dir_name.to_string(),
+        tool: tool.key().to_string(),
+        target_path: target.to_string_lossy().to_string(),
+        mode: used[0],
+        installed_hash,
+        installed_version: None,
+        source: SkillSource {
+            kind: crate::state::SourceKind::Local,
+            repo_url: None,
+            repo_path: None,
+            branch: None,
+            commit: None,
+        },
+        installed_at: chrono::Utc::now().timestamp(),
+        ignored_remote_hash: None,
+    })
+}
+
+/// 安装一个技能到多个工具（SSOT 模式）
+///
+/// 全成功才返回 Ok，任一失败返回 Err。需要「逐条独立成败」的场景请用
+/// `install_each_tool`。
 pub fn install_many(
     name: &str,
     source_dir: &Path,

@@ -3,9 +3,11 @@ import {
   api,
   INSTALL_MODE_LABEL,
   InstallMode,
+  InstallOutcome,
   InstalledSkill,
   RemoteSkill,
   ToolDetection,
+  toolLabel,
 } from "../api";
 
 interface Props {
@@ -40,19 +42,25 @@ export default function InstallDialog({
     );
   };
 
-  const submit = async (allowCreate: boolean) => {
+  const [outcome, setOutcome] = useState<InstallOutcome | null>(null);
+
+  const submit = async (allowCreate: boolean, onlyTools?: string[]) => {
     setBusy(true);
     setError(null);
+    setOutcome(null);
+    const targets = onlyTools ?? selected;
     try {
-      const recs = await api.installSkill({
+      const result = await api.installSkill({
         name: skill.name,
         repoPath: skill.repoPath,
-        tools: selected,
+        tools: targets,
         allowCreateSkillsDir: allowCreate,
       });
       // 记录实际采用的方式：Auto 可能被解析成 junction 或 copy
-      setUsedMode(recs[0]?.mode ?? null);
-      onDone(recs);
+      setUsedMode(result.succeeded[0]?.mode ?? null);
+      setOutcome(result);
+      // 成功的已经落盘并记录，先通知外层刷新
+      if (result.succeeded.length > 0) onDone(result.succeeded);
     } catch (e) {
       const msg = String(e);
       if (msg.includes("需要创建")) setNeedCreateDir(true);
@@ -158,6 +166,40 @@ export default function InstallDialog({
                   {usedMode === "copy" && "（每个工具各存一份副本）"}
                   {(usedMode === "junction" || usedMode === "symlink") &&
                     "（各工具目录里是指向 library 的指针）"}
+                </div>
+              )}
+
+              {/* 逐工具结果：一个工具失败不影响其它，失败的可单独重试 */}
+              {outcome && (
+                <div className="field" style={{ marginTop: 10 }}>
+                  <label>安装结果</label>
+                  <div className="tool-list">
+                    {outcome.succeeded.map((r) => (
+                      <div className="tool-row" key={`ok-${r.tool}`}>
+                        <span className="badge accent">✓ 已安装</span>
+                        <span>{toolLabel(r.tool, tools)}</span>
+                      </div>
+                    ))}
+                    {outcome.failed.map((f) => (
+                      <div className="tool-row" key={`fail-${f.tool}`}>
+                        <span className="badge warn">✗ 失败</span>
+                        <span>{toolLabel(f.tool, tools)}</span>
+                        <span className="page-sub" style={{ marginLeft: 8 }}>
+                          {f.message}
+                        </span>
+                        {f.retryable && (
+                          <button
+                            className="ghost sm"
+                            style={{ marginLeft: "auto" }}
+                            disabled={busy}
+                            onClick={() => submit(false, [f.tool])}
+                          >
+                            重试
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
