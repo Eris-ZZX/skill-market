@@ -262,6 +262,46 @@ export function placements(item: MySkillItem): SkillPlacement[] {
   }));
 }
 
+/** 矩阵里一个格子的状态 */
+export interface MatrixCellState {
+  tool: string;
+  installed: boolean;
+  /** 仅 installed 时有值 */
+  targetPath: string | null;
+  /** 仅 installed 时有意义 */
+  updateStatus: UpdateStatus | null;
+  /** 上次操作失败标记（前端内存态，不持久化） */
+  failed: boolean;
+}
+
+/**
+ * 把一个技能摊成「每工具一格」
+ *
+ * 列由调用方给定（只传本机已装的工具，避免 6 列过宽），
+ * 没在该技能 `tools` 里的工具就是未装。
+ */
+export function matrixCells(
+  item: MySkillItem,
+  tools: string[],
+  updates: UpdateCheckItem[],
+  failedTools: string[] = [],
+): MatrixCellState[] {
+  return tools.map((tool) => {
+    const idx = item.tools.indexOf(tool);
+    const installed = idx >= 0;
+    const update = installed
+      ? updates.find((u) => u.name === item.name && u.tool === tool)
+      : undefined;
+    return {
+      tool,
+      installed,
+      targetPath: installed ? (item.targetPaths[idx] ?? null) : null,
+      updateStatus: update ? update.status : null,
+      failed: failedTools.includes(tool),
+    };
+  });
+}
+
 /** 需要用户处理的更新状态 */
 const PENDING_STATUSES: UpdateStatus[] = [
   "updateavailable",

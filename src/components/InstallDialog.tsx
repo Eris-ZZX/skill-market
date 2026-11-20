@@ -15,6 +15,8 @@ interface Props {
   skill: RemoteSkill;
   tools: ToolDetection[];
   alreadyInstalled: string[];
+  /** 从矩阵点未装格子进来时，预选该工具 */
+  preselect?: string[];
   onClose: () => void;
   onDone: (recs: InstalledSkill[]) => void;
 }
@@ -23,15 +25,20 @@ export default function InstallDialog({
   skill,
   tools,
   alreadyInstalled,
+  preselect,
   onClose,
   onDone,
 }: Props) {
   const available = tools.filter(
     (t) => t.installed && !alreadyInstalled.includes(t.key),
   );
-  const [selected, setSelected] = useState<string[]>(
-    available.length > 0 ? [available[0].key] : [],
-  );
+  const [selected, setSelected] = useState<string[]>(() => {
+    const wanted = (preselect ?? []).filter((k) =>
+      available.some((t) => t.key === k),
+    );
+    if (wanted.length > 0) return wanted;
+    return available.length > 0 ? [available[0].key] : [];
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needCreateDir, setNeedCreateDir] = useState(false);
