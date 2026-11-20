@@ -5,6 +5,7 @@ import {
   countPending,
   MySkillItem,
   placements,
+  RemoteFailure,
   SkillPlacement,
   statusLabel,
   ToolDetection,
@@ -62,13 +63,34 @@ export default function InstalledPage({
     api.stateHealth().then(setHealth).catch(() => setHealth(null));
   }, []);
 
+  // 远端失败原因：有值时顶部显示提示，但列表照常显示（用缓存算出的状态）
+  const [failures, setFailures] = useState<RemoteFailure[]>([]);
+
+  /**
+   * 统一处理 checkUpdates 的返回
+   *
+   * 后端现在不会因远端读取失败而整体报错，失败放进 failures 带回来。
+   * 所以这里照常接收 items，同时记下 failures 供顶部提示使用。
+   */
+  const refreshUpdates = async () => {
+    try {
+      const r = await api.checkUpdates();
+      onRefreshUpdates(r.items);
+      setFailures(r.failures);
+    } catch (e) {
+      // 真正返回 Err 的只剩配置缺失这类问题，此时旧状态必须清掉
+      onRefreshUpdates([]);
+      setFailures([]);
+      setError(String(e));
+    }
+  };
+
   const uninstall = async (name: string, tool: string) => {
     try {
       await api.uninstallSkill(name, tool);
       setConfirmUninstall(null);
       await load();
-      const u = await api.checkUpdates().catch(() => []);
-      onRefreshUpdates(u);
+      await refreshUpdates();
     } catch (e) {
       setError(String(e));
     }
@@ -96,8 +118,7 @@ export default function InstalledPage({
       await api.updateSkill(name, tool);
       await load();
       // 更新后状态必须重算，否则旧蓝标会留在界面上
-      const u = await api.checkUpdates().catch(() => []);
-      onRefreshUpdates(u);
+      await refreshUpdates();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -116,8 +137,7 @@ export default function InstalledPage({
       await api.resolveConflict(name, tool, choice);
       setResolving(null);
       await load();
-      const u = await api.checkUpdates().catch(() => []);
-      onRefreshUpdates(u);
+      await refreshUpdates();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -129,14 +149,10 @@ export default function InstalledPage({
     setLoading(true);
     setError(null);
     try {
-      const u = await api.checkUpdates();
-      onRefreshUpdates(u);
+      // 远端读不到时后端不再整体报错，而是带着 failures 返回缓存结果，
+      // 所以这里不需要 catch 兜底清空——列表照常显示
+      await refreshUpdates();
       await load();
-    } catch (e) {
-      // 上一次的蓝标必须清掉：留着旧结果等于告诉用户「刚检查过」，
-      // 而实际上这一轮什么都没查成
-      onRefreshUpdates([]);
-      setError(`无法连接远端仓库，当前状态未能刷新：${String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -227,6 +243,24 @@ export default function InstalledPage({
       </div>
 
       {health && <div className="banner warn">{health}</div>}
+      {failures.length > 0 && (
+        <div className="banner warn">
+          <div style={{ fontWeight: 500 }}>
+            无法刷新远端数据，以下为上次缓存结果，可能不是最新
+          </div>
+          {failures.map((f, i) => (
+            <div key={i} className="page-sub" style={{ marginTop: 4 }}>
+              {f.message}
+              {f.detail && (
+                <details style={{ marginTop: 2 }}>
+                  <summary style={{ cursor: "pointer" }}>技术详情</summary>
+                  <div className="mono break">{f.detail}</div>
+                </details>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {error && <div className="banner error">{error}</div>}
 
       {items.length === 0 ? (

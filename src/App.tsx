@@ -46,9 +46,12 @@ export default function App() {
       settings?.gitlabBaseUrl && settings?.gitlabProjectPath;
     if (!hasConfig) return;
 
-    api.checkUpdates().then(setUpdates).catch(() => {
-      /* 离线或未配置时静默失败 */
-    });
+    api
+      .checkUpdates()
+      .then((r) => setUpdates(r.items))
+      .catch(() => {
+        /* 配置缺失等致命问题：静默失败，页面会给出提示 */
+      });
   }, [ready, settings?.gitlabBaseUrl, settings?.gitlabProjectPath]);
 
   // 扫描结果由 App 持有：角标与页内计数必须基于同一份数据

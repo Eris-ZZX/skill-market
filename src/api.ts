@@ -77,6 +77,22 @@ export interface UpdateCheckItem {
   ignored: boolean;
 }
 
+/** 一次「检查更新」的完整结果 */
+export interface UpdateCheckResult {
+  items: UpdateCheckItem[];
+  failures: RemoteFailure[];
+}
+
+/** 远端读取失败的一条记录 */
+export interface RemoteFailure {
+  /** network | auth | notfound | parse | config */
+  kind: "network" | "auth" | "notfound" | "parse" | "config";
+  /** 用户可读的中文原因 */
+  message: string;
+  /** 原始技术信息，供排查 */
+  detail: string;
+}
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
@@ -231,7 +247,7 @@ export const api = {
   }) => invoke<InstalledSkill[]>("install_skill", args),
   uninstallSkill: (name: string, tool: string) =>
     invoke<void>("uninstall_skill", { name, tool }),
-  checkUpdates: () => invoke<UpdateCheckItem[]>("check_updates"),
+  checkUpdates: () => invoke<UpdateCheckResult>("check_updates"),
   updateSkill: (name: string, tool: string) =>
     invoke<InstalledSkill>("update_skill", { name, tool }),
   resolveConflict: (name: string, tool: string, choice: ConflictChoice) =>
