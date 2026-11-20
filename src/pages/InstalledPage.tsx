@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import ErrorBanner from "../components/ErrorBanner";
+import InstallDialog from "../components/InstallDialog";
+import { MatrixCell, MatrixHeader } from "../components/MatrixCell";
 import {
   api,
   ConflictChoice,
   countPending,
   MySkillItem,
+  matrixCells,
+  MatrixCellState,
+  RemoteSkill,
   placements,
   RemoteFailure,
   SkillPlacement,
@@ -30,7 +35,7 @@ interface Props {
   onNavigateSettings?: () => void;
 }
 
-type View = "bySkill" | "byTool";
+type View = "bySkill" | "byTool" | "matrix";
 
 const IDENTITY_LABEL: Record<string, string> = {
   managed: "本工具管理",
@@ -50,6 +55,11 @@ export default function InstalledPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>("bySkill");
+  // 矩阵里点未装格子时打开的安装弹窗
+  const [installTarget, setInstallTarget] = useState<{
+    skill: RemoteSkill;
+    preselect: string[];
+  } | null>(null);
   const [query, setQuery] = useState("");
   // 待卸载的技能；placements 决定弹层里给出几个工具的入口
   const [confirmUninstall, setConfirmUninstall] = useState<
@@ -197,6 +207,67 @@ export default function InstalledPage({
   // 与侧边栏角标共用同一口径，两处数字在任何时刻都相等
   const pendingCount = countPending(items, updates);
 
+  // 只显示本机已装的工具列：6 列 × 36px 在 640px 窗口里会挤
+  const matrixTools = useMemo(
+    () => tools.filter((t) => t.installed).map((t) => t.key),
+    [tools],
+  );
+
+  // 每列已装数量（格子里是实心的那些）
+  const matrixCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const t of matrixTools) counts[t] = 0;
+    for (const item of filtered) {
+      for (const t of item.tools) {
+        if (t in counts) counts[t] += 1;
+      }
+    }
+    return counts;
+  }, [filtered, matrixTools]);
+
+  /** 矩阵格子点击：已装 → 卸载确认；未装 → 打开安装弹窗 */
+  const onMatrixClick = (item: MySkillItem, cell: MatrixCellState) => {
+    if (!cell.installed) {
+      void openInstallFor(item, cell.tool);
+      return;
+    }
+    // external 的技能不是本工具装的，删了就是在动别人的东西
+    if (item.identity === "external") {
+      setError(
+        JSON.stringify({
+          code: "EXTERNAL_MANAGED",
+          message: "该技能由外部工具管理，请在原工具中操作",
+          detail: cell.targetPath ?? "",
+          action: null,
+        }),
+      );
+      return;
+    }
+    setConfirmUninstall({ name: item.name, placements: [{ tool: cell.tool, targetPath: cell.targetPath ?? "" }] });
+  };
+
+  /** 未装格子 → 从缓存索引里找到这条远端技能，打开安装弹窗并预选该工具 */
+  const openInstallFor = async (item: MySkillItem, tool: string) => {
+    try {
+      const remote = await api.listRemoteSkills();
+      const hit = remote.find((r) => r.name === item.name);
+      if (!hit) {
+        setError(
+          JSON.stringify({
+            code: "SKILL_NOT_FOUND",
+            message: "仓库里找不到这个技能（可能已被删除）",
+            detail: `本地有 ${item.name}，但远端索引里没有同名技能`,
+            action: null,
+          }),
+        );
+        return;
+      }
+      setInstallTarget({ skill: hit, preselect: [tool] });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const statusBadge = (item: MySkillItem) => {
     if (item.identity === "external")
       return <span className="badge">{IDENTITY_LABEL.external}</span>;
@@ -300,17 +371,24 @@ export default function InstalledPage({
             <div style={{ display: "flex", gap: 0 }}>
               <button
                 className={view === "bySkill" ? "primary sm" : "sm"}
-                style={{ borderRadius: "6px 0 0 6px" }}
+                style={{ borderRadius: "6px 0 0 0" }}
                 onClick={() => setView("bySkill")}
               >
                 按技能
               </button>
               <button
                 className={view === "byTool" ? "primary sm" : "sm"}
-                style={{ borderRadius: "0 6px 6px 0", marginLeft: -1 }}
+                style={{ borderRadius: 0, marginLeft: -1 }}
                 onClick={() => setView("byTool")}
               >
                 按工具
+              </button>
+              <button
+                className={view === "matrix" ? "primary sm" : "sm"}
+                style={{ borderRadius: "0 6px 6px 0", marginLeft: -1 }}
+                onClick={() => setView("matrix")}
+              >
+                矩阵
               </button>
             </div>
           </div>
@@ -488,6 +566,53 @@ export default function InstalledPage({
               </div>
             ))
           )}
+
+          {view === "matrix" && (
+            <table className="matrix">
+              <thead>
+                <tr>
+                  <th className="matrix-name">技能</th>
+                  {matrixTools.map((t) => (
+                    <MatrixHeader
+                      key={t}
+                      toolKey={t}
+                      label={toolLabel(t, tools)}
+                      count={matrixCounts[t] ?? 0}
+                    />
+                  ))}
+                  <th className="matrix-identity"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((item) => (
+                  <tr key={`${item.name}-${item.targetPaths[0] ?? ""}`}>
+                    <td className="matrix-name">
+                      <div style={{ fontWeight: 500 }}>{item.name}</div>
+                      {item.description && (
+                        <div className="page-sub">{item.description}</div>
+                      )}
+                    </td>
+                    {matrixCells(item, matrixTools, updates, []).map((cell) => (
+                      <td key={cell.tool} style={{ textAlign: "center" }}>
+                        <MatrixCell
+                          cell={cell}
+                          skillName={item.name}
+                          toolLabel={toolLabel(cell.tool, tools)}
+                          external={item.identity === "external"}
+                          onClick={() => onMatrixClick(item, cell)}
+                        />
+                      </td>
+                    ))}
+                    <td className="matrix-identity">
+                      <span className="badge">
+                        {IDENTITY_LABEL[item.identity] ?? item.identity}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </>
       )}
 
@@ -567,6 +692,22 @@ export default function InstalledPage({
             </div>
           </div>
         </div>
+      )}
+
+      {installTarget && (
+        <InstallDialog
+          skill={installTarget.skill}
+          tools={tools}
+          alreadyInstalled={items
+            .filter((i) => i.name === installTarget.skill.name)
+            .flatMap((i) => i.tools)}
+          preselect={installTarget.preselect}
+          onClose={() => setInstallTarget(null)}
+          onDone={() => {
+            setInstallTarget(null);
+            void load();
+          }}
+        />
       )}
 
       {confirmUninstall && (

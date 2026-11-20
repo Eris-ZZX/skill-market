@@ -734,3 +734,103 @@ input[type="checkbox"] {
     transform: rotate(360deg);
   }
 }
+
+/* ========== 矩阵视图 ========== */
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.matrix th,
+.matrix td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 4px;
+  vertical-align: middle;
+}
+
+/* 名称列最宽，其余列定宽：4-6 列在 640px 窗口内都放得下 */
+.matrix .matrix-name {
+  text-align: left;
+  padding-left: 9px;
+  min-width: 150px;
+}
+
+.matrix .matrix-col {
+  width: 36px;
+  text-align: center;
+  color: var(--text-sub);
+  font-weight: 500;
+}
+
+.matrix-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-sub);
+  border: 1px solid var(--border);
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--text-sub);
+}
+
+.matrix-count {
+  display: block;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+
+.matrix-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.matrix-cell:hover {
+  background: var(--bg-sub);
+}
+
+.matrix-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.matrix-on .matrix-box {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.matrix-off .matrix-box {
+  background: transparent;
+}
+
+.matrix-fail .matrix-box {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.matrix-identity {
+  padding-left: 9px;
+  white-space: nowrap;
+}
