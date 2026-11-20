@@ -13,6 +13,11 @@ import {
   RemoteSkill,
   parseError,
   resolveBulkScope,
+  applyFilters,
+  EMPTY_FILTERS,
+  FilterState,
+  StatusFilter,
+  IdentityFilter,
   placements,
   RemoteFailure,
   SkillPlacement,
@@ -63,7 +68,6 @@ export default function InstalledPage({
     skill: RemoteSkill;
     preselect: string[];
   } | null>(null);
-  const [query, setQuery] = useState("");
   // 待卸载的技能；placements 决定弹层里给出几个工具的入口
   const [confirmUninstall, setConfirmUninstall] = useState<
     { name: string; placements: SkillPlacement[] } | null
@@ -222,16 +226,14 @@ export default function InstalledPage({
   const updateOf = (name: string, tool: string) =>
     updates.find((u) => u.name === name && u.tool === tool);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (i) =>
-        i.name.toLowerCase().includes(q) ||
-        i.description.toLowerCase().includes(q) ||
-        i.tools.some((t) => toolLabel(t, tools).toLowerCase().includes(q)),
-    );
-  }, [items, query, tools]);
+  // 筛选状态统一放在组件顶部：#56 的批量操作读的必须是这份筛选结果，
+  // 页面里不能再另算一份近似版本
+  const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+
+  const filtered = useMemo(
+    () => applyFilters(items, updates, filters),
+    [items, updates, filters],
+  );
 
   // 按工具分组时直接携带落盘配对，避免后面用 indexOf 反查路径
   const byTool = useMemo(() => {
@@ -484,9 +486,64 @@ export default function InstalledPage({
             <input
               className="search"
               placeholder="搜索技能名、描述、工具…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              value={filters.query}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, query: e.target.value }))
+              }
             />
+            <select
+              className="select-sm"
+              value={filters.status}
+              onChange={(e) =>
+                setFilters((f) => ({
+                  ...f,
+                  status: e.target.value as StatusFilter,
+                }))
+              }
+              title="按状态筛选"
+            >
+              <option value="all">状态：全部</option>
+              <option value="updates">有更新</option>
+              <option value="local-modified">本地已改</option>
+              <option value="conflict">需处理</option>
+              <option value="none">无问题</option>
+            </select>
+            <select
+              className="select-sm"
+              value={filters.tool}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, tool: e.target.value }))
+              }
+              title="按工具筛选"
+            >
+              <option value="all">工具：全部</option>
+              {tools
+                .filter((t) => t.installed)
+                .map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.displayName}
+                  </option>
+                ))}
+            </select>
+            <select
+              className="select-sm"
+              value={filters.identity}
+              onChange={(e) =>
+                setFilters((f) => ({
+                  ...f,
+                  identity: e.target.value as IdentityFilter,
+                }))
+              }
+              title="按身份筛选"
+            >
+              <option value="all">身份：全部</option>
+              <option value="managed">本工具管理</option>
+              <option value="external">外部管理</option>
+              <option value="local">本地已有</option>
+            </select>
+            <span className="page-sub" style={{ whiteSpace: "nowrap" }}>
+              显示 {filtered.length} / {items.length}
+            </span>
             <div style={{ display: "flex", gap: 0 }}>
               <button
                 className={view === "bySkill" ? "primary sm" : "sm"}
@@ -704,7 +761,7 @@ export default function InstalledPage({
                       <>
                         <div className="page-sub" style={{ marginBottom: 6 }}>
                           {installed} / {filtered.length} 个技能已装
-                          {query && `（当前筛选：${filtered.length} 个）`}
+                          {filters.query && `（当前筛选：${filtered.length} 个）`}
                         </div>
                         <button
                           className="ghost sm"
@@ -735,6 +792,16 @@ export default function InstalledPage({
                           }}
                         >
                           全部卸载（{installed} 个）
+                        </button>
+                        <button
+                          className="ghost sm"
+                          onClick={() => {
+                            // 只看这一列 = 把工具筛选设为该工具
+                            setFilters((f) => ({ ...f, tool: openColumn }));
+                            setOpenColumn(null);
+                          }}
+                        >
+                          只看这一列
                         </button>
                       </>
                     );

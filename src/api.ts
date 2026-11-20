@@ -366,6 +366,92 @@ export function resolveBulkScope(
   return { targets, alreadyDone };
 }
 
+/** 状态筛选 */
+export type StatusFilter =
+  | "all"
+  | "updates"
+  | "local-modified"
+  | "conflict"
+  | "none";
+/** 工具筛选：`all` 或工具 key */
+export type ToolFilter = "all" | string;
+/** 身份筛选 */
+export type IdentityFilter = "all" | "managed" | "external" | "local";
+
+export interface FilterState {
+  query: string;
+  status: StatusFilter;
+  tool: ToolFilter;
+  identity: IdentityFilter;
+}
+
+export const EMPTY_FILTERS: FilterState = {
+  query: "",
+  status: "all",
+  tool: "all",
+  identity: "all",
+};
+
+/** 该技能在某个工具下的更新状态（没有记录时为 null） */
+function statusOf(
+  item: MySkillItem,
+  tool: string,
+  updates: UpdateCheckItem[],
+): UpdateStatus | null {
+  const u = updates.find((x) => x.name === item.name && x.tool === tool);
+  return u ? u.status : null;
+}
+
+/**
+ * 按状态/工具/身份/关键字筛选
+ *
+ * 多条件之间是 AND：全部满足才保留。工具维度只看该技能是否装在那个工具下；
+ * 状态维度看该技能**任一**工具的状态——技能是一个整体，装在 3 个工具下
+ * 只要有 1 个可更新，它就该出现在「有更新」里。
+ *
+ * 这个函数的返回结果同时是 #56 批量操作的作用域，所以筛选逻辑必须只有
+ * 这一份，不能页面里另写一个近似版本。
+ */
+export function applyFilters(
+  items: MySkillItem[],
+  updates: UpdateCheckItem[],
+  f: FilterState,
+): MySkillItem[] {
+  const q = f.query.trim().toLowerCase();
+
+  return items.filter((item) => {
+    if (f.identity !== "all" && item.identity !== f.identity) return false;
+    if (f.tool !== "all" && !item.tools.includes(f.tool)) return false;
+
+    // 状态看任一工具：一个技能可能装多处，任一处需要处理就该被筛选出来
+    const statuses = item.tools
+      .map((t) => statusOf(item, t, updates))
+      .filter((s): s is UpdateStatus => s !== null);
+
+    if (f.status !== "all") {
+      const matched =
+        f.status === "none"
+          ? // 无问题 = 所有已知状态都是「最新」；一条记录都没有也算无问题
+            statuses.every((s) => s === "uptodate")
+          : f.status === "updates"
+            ? statuses.includes("updateavailable")
+            : f.status === "local-modified"
+              ? statuses.includes("locallymodified")
+              : statuses.includes("conflict");
+      if (!matched) return false;
+    }
+
+    if (q) {
+      const hit =
+        item.name.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q) ||
+        item.tools.some((t) => t.toLowerCase().includes(q));
+      if (!hit) return false;
+    }
+    return true;
+  });
+}
+
 /** 需要用户处理的更新状态 */
 const PENDING_STATUSES: UpdateStatus[] = [
   "updateavailable",
