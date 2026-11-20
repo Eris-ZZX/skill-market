@@ -1077,6 +1077,96 @@ pub struct ResyncFailure {
     pub message: String,
 }
 
+/// 一条转换项（前端展示用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateItem {
+    pub name: String,
+    pub tool: String,
+    pub from: InstallMode,
+    pub to: InstallMode,
+}
+
+/// 批量转换同步方式的结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateReportView {
+    pub migrated: Vec<MigrateItem>,
+    pub skipped: Vec<MigrateItem>,
+    pub skipped_modified: Vec<MigrateItem>,
+    /// (name, tool, message)
+    pub failed: Vec<MigrateFailureView>,
+    /// 释放的字节数
+    pub freed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateFailureView {
+    pub name: String,
+    pub tool: String,
+    pub message: String,
+}
+
+/// 把已装技能批量转成目标同步方式
+///
+/// 只改工具目录的部署方式，**库内容不动**——所以转换不会影响 SSOT。
+/// 逐条独立：一条失败不影响其余。
+#[tauri::command]
+pub fn migrate_sync_method(
+    state: State<'_, AppState>,
+    target: InstallMode,
+) -> Result<MigrateReportView, String> {
+    // 整个循环持写锁：转换期间不能与更新/安装交错
+    let _write = crate::skill_lock::write_guard();
+
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let records = lock(&state)?.installs.clone();
+
+    let report = crate::install::migrate_all(&records, &library_root, target);
+
+    // 把成功转换的记录写回 state.json：mode 必须是实际采用的那个，
+    // 而不是用户请求的（junction 建不出来时可能落到别的）
+    if !report.migrated.is_empty() {
+        let mut guard = lock(&state)?;
+        for (name, tool, _, used) in &report.migrated {
+            if let Some(rec) = guard
+                .installs
+                .iter_mut()
+                .find(|r| &r.name == name && &r.tool == tool)
+            {
+                rec.mode = *used;
+            }
+        }
+        crate::storage::save(&guard).map_err(|e| crate::skill_error::error_json(e))?;
+    }
+
+    let to_item = |(name, tool, from, to): (String, String, InstallMode, InstallMode)| {
+        MigrateItem {
+            name,
+            tool,
+            from,
+            to,
+        }
+    };
+
+    Ok(MigrateReportView {
+        migrated: report.migrated.into_iter().map(to_item).collect(),
+        skipped: report.skipped.into_iter().map(to_item).collect(),
+        skipped_modified: report.skipped_modified.into_iter().map(to_item).collect(),
+        failed: report
+            .failed
+            .into_iter()
+            .map(|(name, tool, message)| MigrateFailureView {
+                name,
+                tool,
+                message,
+            })
+            .collect(),
+        freed_bytes: report.freed_bytes,
+    })
+}
+
 /// 检查并修复「记录还在但目录没了」的技能
 ///
 /// 逐条独立：一条修不了不影响其他（用 Vec 收集而不是 `?` 提前返回）。

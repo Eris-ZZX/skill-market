@@ -256,6 +256,7 @@ pub fn run() {
             commands::uninstall_skill,
             commands::check_updates,
             commands::resync_skills,
+            commands::migrate_sync_method,
             commands::list_skill_backups,
             commands::restore_skill_backup,
             commands::delete_skill_backup,

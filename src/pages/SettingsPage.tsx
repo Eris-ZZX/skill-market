@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { api, AppInfo, AppSettings, ToolDetection } from "../api";
+import {
+  api,
+  AppInfo,
+  AppSettings,
+  INSTALL_MODE_LABEL,
+  InstallMode,
+  parseError,
+  ToolDetection,
+} from "../api";
 
 interface Props {
   tools: ToolDetection[];
@@ -18,6 +26,48 @@ export default function SettingsPage({
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [migrateResult, setMigrateResult] = useState<string | null>(null);
+  const [confirmMigrate, setConfirmMigrate] = useState<InstallMode | null>(null);
+
+  /**
+   * 把已装技能批量转成目标同步方式
+   *
+   * 只改工具目录的部署方式，库内容不动。有本地改动的会被跳过——
+   * copy→链接要删副本，删了就找不回来。
+   */
+  const runMigrate = async (target: InstallMode) => {
+    setMigrating(true);
+    setMigrateResult(null);
+    setConfirmMigrate(null);
+    try {
+      const r = await api.migrateSyncMethod(target);
+      const parts: string[] = [];
+      if (r.migrated.length > 0) {
+        const mb = (r.freedBytes / 1024 / 1024).toFixed(1);
+        parts.push(`${r.migrated.length} 个已转换，释放 ${mb} MB`);
+      }
+      if (r.skipped.length > 0) {
+        parts.push(`${r.skipped.length} 个跳过（已是目标方式）`);
+      }
+      if (r.skippedModified.length > 0) {
+        parts.push(`${r.skippedModified.length} 个跳过（本地有改动）`);
+      }
+      if (r.failed.length > 0) {
+        const detail = r.failed
+          .map((f) => `${f.name}（${f.message}）`)
+          .join("；");
+        parts.push(`${r.failed.length} 个失败：${detail}`);
+      }
+      setMigrateResult(
+        parts.length > 0 ? `转换完成：${parts.join("，")}` : "没有需要转换的技能",
+      );
+    } catch (e) {
+      setMigrateResult(`转换失败：${parseError(e).message}`);
+    } finally {
+      setMigrating(false);
+    }
+  };
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<
     { ok: boolean; msg: string } | null
@@ -127,21 +177,39 @@ export default function SettingsPage({
 
         <div className="field">
           <label>默认安装方式</label>
-          <select
-            value={form.defaultInstallMode}
-            onChange={(e) =>
-              set("defaultInstallMode", e.target.value as AppSettings["defaultInstallMode"])
-            }
-          >
-            <option value="junction">链接（推荐）</option>
-            <option value="copy">复制</option>
-            <option value="auto">自动（链接失败则复制）</option>
-            <option value="symlink">软链</option>
-          </select>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              style={{ flex: 1 }}
+              value={form.defaultInstallMode}
+              onChange={(e) =>
+                set("defaultInstallMode", e.target.value as AppSettings["defaultInstallMode"])
+              }
+            >
+              <option value="junction">链接（推荐）</option>
+              <option value="copy">复制</option>
+              <option value="auto">自动（链接失败则复制）</option>
+              <option value="symlink">软链</option>
+            </select>
+            <button
+              className="sm"
+              disabled={migrating}
+              onClick={() => setConfirmMigrate(form.defaultInstallMode)}
+            >
+              {migrating && <span className="spinner" />}
+              应用到已装技能
+            </button>
+          </div>
           <div className="hint">
             链接方式下技能只在 library 目录存一份，各工具目录里放指针，
             改一处处处生效。复制方式每个工具各存一份独立副本。
+            <br />
+            改这里只影响新装的技能；已装的用右边按钮批量转换。
           </div>
+          {migrateResult && (
+            <div className="banner info" style={{ marginTop: 8 }}>
+              {migrateResult}
+            </div>
+          )}
         </div>
 
         <div className="field">
@@ -250,6 +318,39 @@ export default function SettingsPage({
           </>
         )}
       </div>
+
+      {confirmMigrate && (
+        <div className="overlay" onClick={() => setConfirmMigrate(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <h2 className="modal-title">转换已装技能</h2>
+              </div>
+            </div>
+            <div className="modal-body">
+              <div className="detail-text">
+                把已装技能全部转换为
+                <b> {INSTALL_MODE_LABEL[confirmMigrate]}</b> 方式。
+                <br />
+                <br />
+                只改工具目录里的部署方式，技能库内容不动。
+                <br />
+                本地改过的技能会被跳过并单独报告。
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button onClick={() => setConfirmMigrate(null)}>取消</button>
+              <button
+                className="primary"
+                disabled={migrating}
+                onClick={() => runMigrate(confirmMigrate)}
+              >
+                确认转换
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

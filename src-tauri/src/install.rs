@@ -1223,6 +1223,157 @@ pub fn delete_backup(backups: &Path, backup_id: &str) -> Result<()> {
     Ok(())
 }
 
+// ========== 同步方式批量转换 ==========
+
+/// 一条记录转换的结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrateAction {
+    /// 已转换
+    Migrated,
+    /// 已是目标方式
+    Skipped,
+    /// 因本地被改动而保护性跳过
+    SkippedModified,
+    /// 失败
+    Failed,
+}
+
+/// 逐条转换的汇总
+#[derive(Debug, Clone, Default)]
+pub struct MigrateReport {
+    /// (技能名, 工具, 原方式, 新方式)
+    pub migrated: Vec<(String, String, InstallMode, InstallMode)>,
+    pub skipped: Vec<(String, String, InstallMode, InstallMode)>,
+    pub skipped_modified: Vec<(String, String, InstallMode, InstallMode)>,
+    pub failed: Vec<(String, String, String)>,
+    /// 释放的字节数（copy→链接时是副本大小，反向转换不扣减）
+    pub freed_bytes: u64,
+}
+
+/// 把一条已装记录转成目标同步方式
+///
+/// 返回 `(action, used_mode, freed_bytes, message)`。
+/// `used_mode` 是转换后实际采用的方式（目标方式建不出来时可能保持原样）。
+///
+/// **核心保护**：工具目录当前哈希与安装时记录不同 = 用户改过，绝不转换。
+/// copy→链接要删掉副本，删了就找不回来，所以这一条必须排在所有写操作之前。
+pub fn migrate_one(
+    name: &str,
+    target_path: &Path,
+    current_mode: InstallMode,
+    installed_hash: &str,
+    target: InstallMode,
+    library_root: &Path,
+) -> (MigrateAction, InstallMode, u64, String) {
+    if current_mode == target {
+        return (MigrateAction::Skipped, current_mode, 0, String::new());
+    }
+    if let Err(e) = require_valid_directory(name) {
+        return (MigrateAction::Failed, current_mode, 0, e.to_string());
+    }
+    let ssot = library_root.join(name);
+    if !ssot.is_dir() {
+        return (
+            MigrateAction::Failed,
+            current_mode,
+            0,
+            "本地库里没有内容，需要重新安装".to_string(),
+        );
+    }
+
+    // 【核心保护】改过的副本不能被「转换」掉
+    match hash::hash_dir(target_path) {
+        Ok(h) if h == installed_hash => {}
+        Ok(_) => {
+            return (
+                MigrateAction::SkippedModified,
+                current_mode,
+                0,
+                "内容被修改过，为保护你的改动已跳过".to_string(),
+            );
+        }
+        Err(e) => {
+            // 读不出来就别动——动错比不动更糟
+            return (
+                MigrateAction::Failed,
+                current_mode,
+                0,
+                format!("无法读取当前内容: {e}"),
+            );
+        }
+    }
+
+    // copy→链接省下的空间 = 副本当前占用
+    let reclaimed = if is_link(target_path) {
+        0
+    } else {
+        dir_size(target_path)
+    };
+
+    // 复用 deploy_many 的 Replace：它已经把「先建新的、旧内容挪进暂存区、
+    // 失败还原」这一套做完了，转换不需要另写一份
+    let deployment = [Deployment {
+        tool: ToolKind::Cursor,
+        target: target_path,
+    }];
+    match deploy_many(&ssot, &deployment, target, DeployPolicy::Replace) {
+        Ok(used) => {
+            let used_mode = used.first().copied().unwrap_or(target);
+            if used_mode == current_mode {
+                // 目标方式建不出来（例如 junction 不可用），保持原样不算转换
+                return (
+                    MigrateAction::Failed,
+                    current_mode,
+                    0,
+                    format!("无法建立目标同步方式（{target:?}）"),
+                );
+            }
+            // 只有真正从「实体目录」转成「链接」才释放空间
+            let freed = if is_link(target_path) { reclaimed } else { 0 };
+            (MigrateAction::Migrated, used_mode, freed, String::new())
+        }
+        Err(e) => (MigrateAction::Failed, current_mode, 0, e.to_string()),
+    }
+}
+
+/// 批量转换
+///
+/// 逐条独立：一条失败不影响其余（用户只是在切换同步方式，不该整体中断）。
+pub fn migrate_all(
+    records: &[InstalledSkill],
+    library_root: &Path,
+    target: InstallMode,
+) -> MigrateReport {
+    let mut report = MigrateReport::default();
+    for rec in records {
+        let (action, used, freed, msg) = migrate_one(
+            &rec.name,
+            Path::new(&rec.target_path),
+            rec.mode,
+            &rec.installed_hash,
+            target,
+            library_root,
+        );
+        let item = (rec.name.clone(), rec.tool.clone(), rec.mode, used);
+        match action {
+            MigrateAction::Migrated => {
+                report.freed_bytes += freed;
+                report.migrated.push(item);
+            }
+            MigrateAction::Skipped => report.skipped.push(item),
+            MigrateAction::SkippedModified => {
+                log::info!("{} ({}) 跳过转换: {msg}", rec.name, rec.tool);
+                report.skipped_modified.push(item);
+            }
+            MigrateAction::Failed => {
+                log::warn!("{} ({}) 转换失败: {msg}", rec.name, rec.tool);
+                report.failed.push((rec.name.clone(), rec.tool.clone(), msg));
+            }
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
