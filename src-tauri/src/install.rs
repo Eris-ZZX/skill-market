@@ -657,10 +657,14 @@ fn rewrite_frontmatter_name(skill_md: &Path, new_name: &str) -> Result<()> {
     if !replaced {
         bail!("frontmatter 里没有 name，跳过");
     }
-    std::fs::write(
-        skill_md,
-        format!("---\n{}\n---\n{}", lines.join("\n"), body),
-    )?;
+    // 逐行重建，保留其它 frontmatter 键——整段替换会把 description /
+    // version 之类的元数据一起抹掉
+    let new_fm = lines.join("\n");
+    if new_fm == fm {
+        // 名字本来就一样：一个字节都不动，避免无意义地重写文件
+        return Ok(());
+    }
+    std::fs::write(skill_md, format!("---{new_fm}\n---{body}"))?;
     Ok(())
 }
 
@@ -1086,6 +1090,137 @@ pub fn resync_all(
         }
     }
     report
+}
+
+// ========== 备份列表与恢复 ==========
+
+/// 一条备份的清单项
+#[derive(Debug, Clone)]
+pub struct BackupEntry {
+    pub backup_id: String,
+    pub meta: BackupMeta,
+    pub size_bytes: u64,
+    /// 库里当前没有同名技能时才可恢复
+    pub is_restorable: bool,
+}
+
+/// 校验 backup_id 是备份根下的单段目录名
+///
+/// backup_id 来自前端，是**不可信输入**：直接 join 会穿越出备份根
+/// 删掉或读取任意目录。
+pub fn validate_backup_id(backup_id: &str) -> Result<()> {
+    if backup_id.is_empty() {
+        bail!("备份标识不能为空");
+    }
+    if backup_id.contains('/') || backup_id.contains('\\') {
+        bail!("备份标识含路径分隔符: {backup_id:?}");
+    }
+    if backup_id == "." || backup_id == ".." || backup_id.starts_with('.') {
+        bail!("备份标识非法: {backup_id:?}");
+    }
+    Ok(())
+}
+
+/// 递归算目录占用字节数（meta 里没有大小，只能现算）
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => total += dir_size(&p),
+            Ok(m) => total += m.len(),
+            Err(_) => {}
+        }
+    }
+    total
+}
+
+/// 列出全部备份，按时间倒序
+///
+/// 缺少或损坏 meta.json 的目录直接跳过——列出来也没法恢复，
+/// 不如不展示，免得用户点了才发现点不动。
+pub fn list_backups(backups: &Path, library_root: &Path) -> Vec<BackupEntry> {
+    let Ok(rd) = std::fs::read_dir(backups) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        if !e.path().is_dir() {
+            continue;
+        }
+        let backup_id = e.file_name().to_string_lossy().to_string();
+        let Ok(meta) = read_backup_meta(&e.path()) else {
+            log::warn!("跳过无 meta.json 或 meta 非法的备份: {backup_id}");
+            continue;
+        };
+        let dest = library_root.join(&meta.name);
+        out.push(BackupEntry {
+            is_restorable: !dest.exists() && !is_link(&dest),
+            backup_id,
+            meta,
+            size_bytes: dir_size(&e.path()),
+        });
+    }
+    // 时间倒序；同一时间戳按 id 排，保证顺序稳定
+    out.sort_by(|a, b| {
+        b.meta
+            .backup_created_at
+            .cmp(&a.meta.backup_created_at)
+            .then_with(|| b.backup_id.cmp(&a.backup_id))
+    });
+    out
+}
+
+/// 库里是否已有同名技能（大小写不敏感）
+///
+/// Windows/macOS 的文件系统不区分大小写，`Grill-Me` 与 `grill-me`
+/// 在那里是同一个目录。只比精确相等会在这些平台上放过冲突。
+fn library_has_ci(library_root: &Path, name: &str) -> bool {
+    let Ok(rd) = std::fs::read_dir(library_root) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(name)
+    })
+}
+
+/// 恢复一份备份到库，返回恢复出的库路径
+///
+/// 只写库，**不自动链到工具目录**：恢复时那些目标可能已被别的技能占用，
+/// 自动推送会覆盖别人的东西。用户之后可以用「检查并修复」按记录推过去。
+pub fn restore_backup(backups: &Path, library_root: &Path, backup_id: &str) -> Result<BackupMeta> {
+    validate_backup_id(backup_id)?;
+    let dir = backups.join(backup_id);
+    if !dir.is_dir() {
+        bail!("备份不存在: {backup_id}");
+    }
+
+    // meta.json 是不可信输入：read_backup_meta 内部已校验 name
+    let meta = read_backup_meta(&dir)?;
+
+    if library_has_ci(library_root, &meta.name) {
+        bail!("库里已有同名技能 {}，请先卸载当前版本", meta.name);
+    }
+
+    restore_backup_as(&dir, library_root, &meta.name)?;
+    Ok(meta)
+}
+
+/// 删除一份备份
+pub fn delete_backup(backups: &Path, backup_id: &str) -> Result<()> {
+    validate_backup_id(backup_id)?;
+    let dir = backups.join(backup_id);
+    if !dir.is_dir() {
+        bail!("备份不存在: {backup_id}");
+    }
+    std::fs::remove_dir_all(&dir)
+        .with_context(|| format!("删除备份失败: {}", dir.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
