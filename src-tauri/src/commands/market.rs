@@ -11,7 +11,7 @@
 use crate::frontmatter::SkillMeta;
 use crate::gitlab::{GitLabClient, GitLabConfig};
 use crate::hash;
-use crate::install;
+use crate::install::{self, InstallOutcome};
 use crate::state::{InstallMode, InstalledSkill, SkillSource, SourceKind};
 use crate::tools::ToolKind;
 use anyhow::{bail, Context, Result};
@@ -203,6 +203,12 @@ fn strip_archive_root(p: &str) -> String {
 }
 
 /// 从仓库安装一个技能到多个工具
+/// 从仓库安装一个技能到多个工具，逐工具独立成败
+///
+/// 返回 `InstallOutcome` 而不是 `Result`：只有一个工具失败时不该让整批失败，
+/// 否则已落盘的其它工具会变成孤儿（磁盘上有、state.json 里没有）。
+///
+/// `on_success` 在每个工具成功后立即调用，调用方负责马上落盘。
 pub async fn install_from_repo(
     cfg: GitLabConfig,
     name: &str,
@@ -210,10 +216,17 @@ pub async fn install_from_repo(
     tools: &[String],
     mode: InstallMode,
     allow_create_skills_dir: bool,
-) -> Result<Vec<InstalledSkill>> {
+    library_root: &Path,
+    on_success: impl FnMut(&InstalledSkill) -> anyhow::Result<()>,
+) -> Result<InstallOutcome> {
     if tools.is_empty() {
         bail!("至少要选一个目标工具");
     }
+
+    let kinds: Vec<ToolKind> = tools
+        .iter()
+        .map(|k| ToolKind::from_key(k).ok_or_else(|| anyhow::anyhow!("未知工具: {k}")))
+        .collect::<Result<_>>()?;
 
     let client = GitLabClient::new(cfg.clone())?;
     let head = client.head_commit().await?;
@@ -232,13 +245,7 @@ pub async fn install_from_repo(
         .ok()
         .and_then(|m| m.version);
 
-    let kinds: Vec<ToolKind> = tools
-        .iter()
-        .map(|k| ToolKind::from_key(k).ok_or_else(|| anyhow::anyhow!("未知工具: {k}")))
-        .collect::<Result<_>>()?;
-
-    let library_root = crate::storage::library_dir()?;
-    install::install_many(
+    install::install_each_tool(
         name,
         &extracted,
         mode,
@@ -256,7 +263,10 @@ pub async fn install_from_repo(
         },
         version,
         allow_create_skills_dir,
-        &library_root,
+        library_root,
+        // R1：根目录不存在就是「工具未安装」，绝不创建
+        |tool| crate::tools::prepare_target(tool, allow_create_skills_dir),
+        on_success,
     )
 }
 

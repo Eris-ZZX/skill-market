@@ -329,6 +329,41 @@ pub fn adopt_skill(
     Ok(rec)
 }
 
+/// 一次安装的逐条结果（前端展示用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOutcomeView {
+    pub succeeded: Vec<InstalledSkill>,
+    pub failed: Vec<InstallFailureView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallFailureView {
+    pub tool: String,
+    pub message: String,
+    pub detail: String,
+    pub retryable: bool,
+}
+
+impl From<crate::install::InstallOutcome> for InstallOutcomeView {
+    fn from(o: crate::install::InstallOutcome) -> Self {
+        Self {
+            succeeded: o.succeeded,
+            failed: o
+                .failed
+                .into_iter()
+                .map(|f| InstallFailureView {
+                    tool: f.tool,
+                    message: f.message,
+                    detail: f.detail,
+                    retryable: f.retryable,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// 安装一个技能
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -339,7 +374,7 @@ pub async fn install_skill(
     tools: Vec<String>,
     allow_create_skills_dir: bool,
     mode: Option<InstallMode>,
-) -> Result<Vec<InstalledSkill>, String> {
+) -> Result<InstallOutcomeView, String> {
     let (cfg, chosen) = {
         let guard = lock(&state)?;
         (
@@ -349,28 +384,33 @@ pub async fn install_skill(
         )
     };
 
-    let installed = crate::commands::market::install_from_repo(
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+
+    // 每个工具成功就立刻落盘：这样即使后面的工具失败，前面装的也不会成为孤儿
+    let outcome = crate::commands::market::install_from_repo(
         cfg,
         &name,
         &repo_path,
         &tools,
         chosen,
         allow_create_skills_dir,
+        &library_root,
+        |rec| {
+            let mut guard = state
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("状态锁已损坏"))?;
+            guard
+                .installs
+                .retain(|x| !(x.name == rec.name && x.tool == rec.tool));
+            guard.installs.push(rec.clone());
+            crate::storage::save(&guard)
+        },
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    // 记录到状态
-    {
-        let mut guard = lock(&state)?;
-        for rec in &installed {
-            guard.installs.retain(|x| !(x.name == rec.name && x.tool == rec.tool));
-            guard.installs.push(rec.clone());
-        }
-        crate::storage::save(&guard).map_err(|e| e.to_string())?;
-    }
-
-    Ok(installed)
+    Ok(InstallOutcomeView::from(outcome))
 }
 
 /// 更新前的校验（纯函数：不碰文件系统、不碰 Tauri）

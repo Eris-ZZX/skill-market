@@ -42,6 +42,20 @@ export const INSTALL_MODE_LABEL: Record<InstallMode, string> = {
   auto: "自动",
 };
 
+/** 单工具安装失败 */
+export interface InstallFailure {
+  tool: string;
+  message: string;
+  detail: string;
+  retryable: boolean;
+}
+
+/** 一次安装的逐条结果 */
+export interface InstallOutcome {
+  succeeded: InstalledSkill[];
+  failed: InstallFailure[];
+}
+
 export interface InstalledSkill {
   name: string;
   tool: string;
@@ -244,7 +258,7 @@ export const api = {
     tools: string[];
     allowCreateSkillsDir: boolean;
     mode?: InstallMode;
-  }) => invoke<InstalledSkill[]>("install_skill", args),
+  }) => invoke<InstallOutcome>("install_skill", args),
   uninstallSkill: (name: string, tool: string) =>
     invoke<void>("uninstall_skill", { name, tool }),
   checkUpdates: () => invoke<UpdateCheckResult>("check_updates"),
