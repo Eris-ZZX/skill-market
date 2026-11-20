@@ -164,6 +164,44 @@ export default function InstalledPage({
     }
   };
 
+  const [resyncing, setResyncing] = useState(false);
+  const [resyncResult, setResyncResult] = useState<string | null>(null);
+
+  /**
+   * 检查并修复「记录还在但目录没了」的技能
+   *
+   * 被手改过的副本会被跳过——修的是「不见了」，不是「我想覆盖」。
+   */
+  const resync = async () => {
+    setResyncing(true);
+    setError(null);
+    setResyncResult(null);
+    try {
+      const r = await api.resyncSkills();
+      const lines: string[] = [];
+      if (r.repaired.length > 0) lines.push(`✓ ${r.repaired.length} 个技能已修复`);
+      if (r.skipped.length > 0) lines.push(`${r.skipped.length} 个无需操作`);
+      if (r.skippedModified.length > 0) {
+        const names = r.skippedModified
+          .map((f) => `${f.name} (${toolLabel(f.tool, tools)})`)
+          .join("、");
+        lines.push(`⚠ ${r.skippedModified.length} 个已跳过（本地有改动）：${names}`);
+      }
+      if (r.failed.length > 0) {
+        const names = r.failed
+          .map((f) => `${f.name} (${toolLabel(f.tool, tools)}) — ${f.message}`)
+          .join("；");
+        lines.push(`⚠ ${r.failed.length} 个失败：${names}`);
+      }
+      setResyncResult(lines.length > 0 ? lines.join("　") : "所有技能状态正常");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResyncing(false);
+    }
+  };
+
   const check = async () => {
     setLoading(true);
     setError(null);
@@ -316,11 +354,17 @@ export default function InstalledPage({
           {pendingCount > 0 && ` · ${pendingCount} 项待处理`}
         </span>
         <div className="spacer" />
+        <button onClick={resync} disabled={loading || resyncing}>
+          {resyncing && <span className="spinner" />}
+          检查并修复
+        </button>
         <button onClick={check} disabled={loading}>
           {loading && <span className="spinner" />}
           检查更新
         </button>
       </div>
+
+      {resyncResult && <div className="banner info">{resyncResult}</div>}
 
       {health && <div className="banner warn">{health}</div>}
       {failures.length > 0 && (

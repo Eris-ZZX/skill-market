@@ -937,6 +937,157 @@ pub fn symlink_supported() -> bool {
     ok
 }
 
+// ========== 重新同步 ==========
+
+/// 一条记录重新同步的结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResyncAction {
+    /// 重建成功
+    Repaired,
+    /// 无需操作
+    Skipped,
+    /// 因本地被改动而保护性跳过
+    SkippedModified,
+    /// 失败
+    Failed,
+}
+
+/// 逐条重新同步的结果汇总
+#[derive(Debug, Clone, Default)]
+pub struct ResyncReport {
+    /// (技能名, 工具)
+    pub repaired: Vec<(String, String)>,
+    pub skipped: Vec<(String, String)>,
+    pub skipped_modified: Vec<(String, String)>,
+    pub failed: Vec<(String, String, String)>,
+}
+
+/// 判断并修复一条落盘
+///
+/// 五个分支按「库 → 目标」的检查顺序，见函数体注释。
+///
+/// **核心保护**：目标存在但内容哈希与 `installed_hash` 不同，说明用户手改过，
+/// 绝不覆盖。这一条必须排在所有写操作之前。
+pub fn resync_one(
+    name: &str,
+    target_path: &Path,
+    mode: InstallMode,
+    installed_hash: &str,
+    library_root: &Path,
+) -> (ResyncAction, String) {
+    // 名字要拼进路径，先校验
+    if let Err(e) = require_valid_directory(name) {
+        return (ResyncAction::Failed, e.to_string());
+    }
+    let ssot = library_root.join(name);
+
+    // 1. 库不存在：没有任何内容可作为重建源，只能让用户重新安装
+    if !ssot.is_dir() {
+        return (
+            ResyncAction::Failed,
+            "本地库里没有内容，需要重新安装".to_string(),
+        );
+    }
+
+    let target_exists = target_path.exists() || is_link(target_path);
+
+    if target_exists {
+        // 2. 是链接但目标已失效（断链）：当作不存在，走重建
+        let broken_link = is_link(target_path) && !target_path.exists();
+
+        if !broken_link {
+            // 3/4. 内容与安装时一致 → 无需操作；不一致 → 用户改过，保护性跳过
+            match hash::hash_dir(target_path) {
+                Ok(h) if h == installed_hash => {
+                    return (ResyncAction::Skipped, String::new());
+                }
+                Ok(_) => {
+                    return (
+                        ResyncAction::SkippedModified,
+                        "内容被修改过，为保护你的改动已跳过".to_string(),
+                    );
+                }
+                Err(e) => {
+                    // 读不出来就别动它——动错比不动更糟
+                    return (
+                        ResyncAction::Failed,
+                        format!("无法读取目标内容: {e}"),
+                    );
+                }
+            }
+        }
+
+        // 断链：先摘掉残壳，否则建新链接会失败
+        if let Err(e) = remove_installed(target_path) {
+            return (ResyncAction::Failed, format!("清理断链失败: {e}"));
+        }
+    }
+
+    // 5. 重建：按记录的 mode 复现
+    if let Some(parent) = target_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (ResyncAction::Failed, format!("创建父目录失败: {e}"));
+        }
+    }
+    let built = match mode {
+        InstallMode::Copy | InstallMode::Auto => copy_dir_recursive(&ssot, target_path),
+        InstallMode::Junction => create_junction(&ssot, target_path),
+        InstallMode::Symlink => create_symlink(&ssot, target_path),
+    };
+    if let Err(e) = built {
+        return (ResyncAction::Failed, format!("重建失败: {e}"));
+    }
+
+    // 重建后必须与库一致，否则这次「修复」等于制造了一个错的副本
+    match hash::hash_dir(target_path) {
+        Ok(h) if h == installed_hash => (ResyncAction::Repaired, String::new()),
+        Ok(h) => (
+            ResyncAction::Repaired,
+            format!("已重建，但与安装时记录的哈希不一致（库 {h} vs 记录 {installed_hash}）"),
+        ),
+        Err(e) => (ResyncAction::Failed, format!("重建后无法读取: {e}")),
+    }
+}
+
+/// 对一批记录逐条重新同步
+///
+/// 逐条独立：一条失败不影响其余。`resolve_library` 给出库根，
+/// 便于测试注入 tempdir。
+pub fn resync_all(
+    records: &[InstalledSkill],
+    library_root: &Path,
+) -> ResyncReport {
+    let mut report = ResyncReport::default();
+    for rec in records {
+        let (action, msg) = resync_one(
+            &rec.name,
+            Path::new(&rec.target_path),
+            rec.mode,
+            &rec.installed_hash,
+            library_root,
+        );
+        let key = (rec.name.clone(), rec.tool.clone());
+        match action {
+            ResyncAction::Repaired => {
+                if !msg.is_empty() {
+                    log::warn!("{} ({}) 重建有异常: {msg}", rec.name, rec.tool);
+                }
+                report.repaired.push(key);
+            }
+            ResyncAction::Skipped => report.skipped.push(key),
+            ResyncAction::SkippedModified => {
+                log::info!("{} ({}) 跳过: {msg}", rec.name, rec.tool);
+                report.skipped_modified.push(key);
+            }
+            ResyncAction::Failed => {
+                log::warn!("{} ({}) 修复失败: {msg}", rec.name, rec.tool);
+                report.failed.push((key.0, key.1, msg));
+            }
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -157,6 +157,20 @@ export const ACTION_LABEL: Record<string, string> = {
   contact_it: "联系 IT",
 };
 
+/** 重新同步的结果 */
+export interface ResyncOutcome {
+  repaired: string[];
+  skipped: string[];
+  failed: ResyncFailure[];
+  skippedModified: ResyncFailure[];
+}
+
+export interface ResyncFailure {
+  name: string;
+  tool: string;
+  message: string;
+}
+
 /** 冲突处理的三选一 */
 export type ConflictChoice = "keepmine" | "useremote" | "keepboth";
 
@@ -366,6 +380,7 @@ export const api = {
   uninstallSkill: (name: string, tool: string) =>
     invoke<void>("uninstall_skill", { name, tool }),
   checkUpdates: () => invoke<UpdateCheckResult>("check_updates"),
+  resyncSkills: () => invoke<ResyncOutcome>("resync_skills"),
   updateSkill: (name: string, tool: string) =>
     invoke<InstalledSkill>("update_skill", { name, tool }),
   resolveConflict: (name: string, tool: string, choice: ConflictChoice) =>
