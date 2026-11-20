@@ -335,6 +335,37 @@ export function matrixCells(
   });
 }
 
+/** 批量操作的作用域 */
+export interface BulkScope {
+  /** 本次会变更的技能名 */
+  targets: string[];
+  /** 已经是目标状态、无需变更的 */
+  alreadyDone: string[];
+}
+
+/**
+ * 计算某列（某个工具）的批量作用域
+ *
+ * `items` 必须传当前**筛选后**的列表，不是全量——否则用户筛了「只看本地已有」
+ * 再做「装上其余」，会连筛掉的技能一起动。
+ *
+ * `wantInstalled` 为 true 表示「装上」，false 表示「卸载」。
+ */
+export function resolveBulkScope(
+  items: MySkillItem[],
+  tool: string,
+  wantInstalled: boolean,
+): BulkScope {
+  const targets: string[] = [];
+  const alreadyDone: string[] = [];
+  for (const item of items) {
+    const installed = item.tools.includes(tool);
+    if (installed === wantInstalled) alreadyDone.push(item.name);
+    else targets.push(item.name);
+  }
+  return { targets, alreadyDone };
+}
+
 /** 需要用户处理的更新状态 */
 const PENDING_STATUSES: UpdateStatus[] = [
   "updateavailable",

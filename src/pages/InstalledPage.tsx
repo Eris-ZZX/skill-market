@@ -11,6 +11,8 @@ import {
   matrixCells,
   MatrixCellState,
   RemoteSkill,
+  parseError,
+  resolveBulkScope,
   placements,
   RemoteFailure,
   SkillPlacement,
@@ -264,6 +266,74 @@ export default function InstalledPage({
     }
     return counts;
   }, [filtered, matrixTools]);
+
+  // 批量操作进行中，避免连点
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+  // 当前打开菜单的列（null = 没开）
+  const [openColumn, setOpenColumn] = useState<string | null>(null);
+  // 行级菜单打开的技能名
+  const [rowMenu, setRowMenu] = useState<string | null>(null);
+
+  /**
+   * 批量执行：逐条独立
+   *
+   * 用 allSettled 而不是 all —— all 遇到第一个 reject 就中断，
+   * 「批量装 5 个，第 3 个失败」会变成「后 2 个根本没尝试」。
+   * 这里要的是「能成的都成，失败的单独报」。
+   */
+  const runBulk = async (
+    names: string[],
+    tool: string,
+    wantInstalled: boolean,
+  ) => {
+    if (names.length === 0) return;
+    setBulkBusy(true);
+    setBulkResult(null);
+    setError(null);
+    try {
+      // 索引只查一次：循环里重复读同一份磁盘缓存没有意义，
+      // 缓存变大后会变成真实的性能问题
+      const remote = wantInstalled ? await api.listRemoteSkills() : [];
+
+      const results = await Promise.allSettled(
+        names.map(async (name) => {
+          if (!wantInstalled) {
+            await api.uninstallSkill(name, tool);
+            return name;
+          }
+          const hit = remote.find((r) => r.name === name);
+          if (!hit) throw new Error(`仓库里找不到 ${name}`);
+          await api.installSkill({
+            name: hit.name,
+            repoPath: hit.repoPath,
+            tools: [tool],
+            allowCreateSkillsDir: true,
+          });
+          return name;
+        }),
+      );
+
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      const failures = results
+        .map((r, i) => ({ r, name: names[i] }))
+        .filter((x) => x.r.status === "rejected")
+        .map((x) => {
+          const reason = (x.r as PromiseRejectedResult).reason;
+          const msg = parseError(reason).message;
+          return `${x.name}（${msg}）`;
+        });
+
+      setBulkResult(
+        failures.length === 0
+          ? `批量完成：${ok} 个成功`
+          : `批量完成：${ok} 个成功，${failures.length} 个失败 —— ${failures.join("；")}`,
+      );
+      await load();
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   /** 矩阵格子点击：已装 → 卸载确认；未装 → 打开安装弹窗 */
   const onMatrixClick = (item: MySkillItem, cell: MatrixCellState) => {
@@ -617,7 +687,66 @@ export default function InstalledPage({
           )}
 
           {view === "matrix" && (
-            <table className="matrix">
+            <>
+              {openColumn && (
+                <div className="matrix-popover">
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                    {toolLabel(openColumn, tools)}
+                  </div>
+                  {(() => {
+                    const installed = resolveBulkScope(
+                      filtered,
+                      openColumn,
+                      true,
+                    ).alreadyDone.length;
+                    const toInstall = filtered.length - installed;
+                    return (
+                      <>
+                        <div className="page-sub" style={{ marginBottom: 6 }}>
+                          {installed} / {filtered.length} 个技能已装
+                          {query && `（当前筛选：${filtered.length} 个）`}
+                        </div>
+                        <button
+                          className="ghost sm"
+                          disabled={bulkBusy || toInstall === 0}
+                          onClick={() => {
+                            const scope = resolveBulkScope(
+                              filtered,
+                              openColumn,
+                              true,
+                            );
+                            setOpenColumn(null);
+                            void runBulk(scope.targets, openColumn, true);
+                          }}
+                        >
+                          装上其余 {toInstall} 个
+                        </button>
+                        <button
+                          className="ghost sm"
+                          disabled={bulkBusy || installed === 0}
+                          onClick={() => {
+                            const scope = resolveBulkScope(
+                              filtered,
+                              openColumn,
+                              false,
+                            );
+                            setOpenColumn(null);
+                            void runBulk(scope.targets, openColumn, false);
+                          }}
+                        >
+                          全部卸载（{installed} 个）
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+              {bulkResult && (
+                <div className="banner info" style={{ marginBottom: 8 }}>
+                  {bulkResult}
+                </div>
+              )}
+              <table className="matrix">
               <thead>
                 <tr>
                   <th className="matrix-name">技能</th>
@@ -627,9 +756,14 @@ export default function InstalledPage({
                       toolKey={t}
                       label={toolLabel(t, tools)}
                       count={matrixCounts[t] ?? 0}
+                      total={filtered.length}
+                      active={openColumn === t}
+                      onClick={() =>
+                        setOpenColumn((prev) => (prev === t ? null : t))
+                      }
                     />
                   ))}
-                  <th className="matrix-identity"></th>
+                  <th className="matrix-identity">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -653,14 +787,69 @@ export default function InstalledPage({
                       </td>
                     ))}
                     <td className="matrix-identity">
-                      <span className="badge">
-                        {IDENTITY_LABEL[item.identity] ?? item.identity}
-                      </span>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <span className="badge">
+                          {IDENTITY_LABEL[item.identity] ?? item.identity}
+                        </span>
+                        <button
+                          className="ghost sm"
+                          title="批量操作"
+                          disabled={bulkBusy}
+                          onClick={() =>
+                            setRowMenu((prev) =>
+                              prev === item.name ? null : item.name,
+                            )
+                          }
+                        >
+                          ⋯
+                        </button>
+                      </div>
+                      {rowMenu === item.name && (
+                        <div className="matrix-menu">
+                          <button
+                            className="ghost sm"
+                            disabled={bulkBusy || matrixTools.length === 0}
+                            onClick={() => {
+                              const names = matrixTools.filter(
+                                (t) => !item.tools.includes(t),
+                              );
+                              setRowMenu(null);
+                              // 行级「装到所有工具」= 逐个工具单独装，
+                              // 这样某个工具失败不影响其余
+                              void (async () => {
+                                for (const t of names) {
+                                  await runBulk([item.name], t, true);
+                                  // 每轮都刷新，避免用旧 items 重复装
+                                  await load();
+                                }
+                              })();
+                            }}
+                          >
+                            装到所有工具
+                          </button>
+                          <button
+                            className="ghost sm"
+                            disabled={bulkBusy || item.tools.length === 0}
+                            onClick={() => {
+                              setRowMenu(null);
+                              void (async () => {
+                                for (const t of item.tools) {
+                                  await runBulk([item.name], t, false);
+                                  await load();
+                                }
+                              })();
+                            }}
+                          >
+                            从所有工具卸载
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </>
           )}
         </>
       )}
