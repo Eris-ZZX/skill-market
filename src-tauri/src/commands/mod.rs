@@ -197,6 +197,10 @@ pub fn judge_identity(
 /// 扫描本机所有技能，按技能名聚合成「我的技能」列表
 #[tauri::command]
 pub fn scan_skills(state: State<'_, AppState>) -> Result<Vec<MySkillItem>, String> {
+    // 遍历技能目录属于读操作，但要与「正在替换文件」的写操作互斥，
+    // 否则可能扫到暂存中的中间状态
+    let _read = crate::skill_lock::read_guard();
+
     let scanned = crate::scan::scan_all();
     let installs = lock(&state)?.installs.clone();
     let app_data = crate::storage::app_data_dir()
@@ -314,6 +318,9 @@ pub fn adopt_skill(
     tool: String,
     target_path: String,
 ) -> Result<InstalledSkill, String> {
+    // 算指纹 + 写记录：期间若有人在改这个目录，算出的指纹就是错的
+    let _guard = crate::skill_lock::write_guard();
+
     let rec = adopt_record(name, tool, target_path)?;
 
     let mut guard = lock(&state)?;
@@ -495,8 +502,14 @@ pub async fn update_skill(
     };
 
     // 2-4. 本地哈希与前置校验
+    //
+    // 算哈希必须持读锁：否则另一端正在替换文件时可能读到半截内容，
+    // 算出一个既不是旧版也不是新版的哈希，然后误判成「本地已修改」
     let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
-    let local_hash = crate::hash::hash_dir(&library_root.join(&name)).ok();
+    let local_hash = {
+        let _read = crate::skill_lock::read_guard();
+        crate::hash::hash_dir(&library_root.join(&name)).ok()
+    };
     let target_rec =
         validate_update_preflight(&name, &tool, &snapshot, local_hash.as_deref())?;
     let repo_path = target_rec
@@ -506,6 +519,7 @@ pub async fn update_skill(
         .ok_or_else(|| "本地导入的技能无法更新（没有远端来源）".to_string())?;
 
     // 5. 下载新版本到临时目录（客户端已有 60 秒传输层超时）
+    //    下载阶段不持写锁：几十秒的耗时操作不该堵住整个应用
     let targets: Vec<(std::path::PathBuf, InstallMode)> = snapshot
         .iter()
         .map(|r| (std::path::PathBuf::from(&r.target_path), r.mode))
@@ -514,6 +528,9 @@ pub async fn update_skill(
     let downloaded = crate::commands::market::download_skill_package(cfg, &repo_path)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 从这里开始全是同步的本地写操作，持写锁直到记录写完
+    let _write = crate::skill_lock::write_guard();
 
     // 6.【必做】下载期间记录可能已变；在任何文件操作之前重新确认
     {
@@ -607,7 +624,11 @@ pub async fn resolve_conflict(
 
     // 保留我的：不动任何文件，只记下「忽略到哪个远端哈希」
     if choice == ConflictChoice::KeepMine {
+        // 网络请求不持锁
         let remote_hash = fetch_remote_hash(&cfg, &repo_path).await?;
+        // 只改 state.json，但记录写入必须与文件操作互斥：
+        // 否则可能与正在进行的更新交叉，留下互相矛盾的记录
+        let _write = crate::skill_lock::write_guard();
         let mut guard = lock(&state)?;
         let rec = guard
             .installs
@@ -620,10 +641,13 @@ pub async fn resolve_conflict(
         return Ok(out);
     }
 
-    // 后两个分支都要拿远端内容，先把包下下来
+    // 后两个分支都要拿远端内容，先把包下下来（不持锁）
     let downloaded = crate::commands::market::download_skill_package(cfg, &repo_path)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 从这里开始全是同步的本地写操作，持写锁直到记录写完
+    let _write = crate::skill_lock::write_guard();
 
     // 下载期间记录可能变化，与 update_skill 同样要在写盘前重新确认
     {
@@ -763,6 +787,10 @@ pub fn uninstall_skill(
     name: String,
     tool: String,
 ) -> Result<(), String> {
+    // 删目录 + 改 state.json 是一体的，中途被别的操作插进来会留下
+    // 「目录没了但记录还在」或反之
+    let _guard = crate::skill_lock::write_guard();
+
     let kind = ToolKind::from_key(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
     crate::install::uninstall(kind, &name).map_err(|e| e.to_string())?;
 
@@ -948,6 +976,9 @@ pub async fn check_updates(state: State<'_, AppState>) -> Result<UpdateCheckResu
     };
 
     let snapshot = lock(&state)?.installs.clone();
+    // 算哈希全程持读锁：这是本票要防的核心场景——
+    // 另一端替换文件时读到半截内容，会算出既非旧版也非新版的哈希
+    let _read = crate::skill_lock::read_guard();
     Ok(assemble_update_result(
         &snapshot,
         remote.as_deref(),
@@ -1000,6 +1031,7 @@ pub async fn skill_history(
 /// 发布前快照列表
 #[tauri::command]
 pub fn list_snapshots() -> Result<Vec<crate::publish::Snapshot>, String> {
+    let _read = crate::skill_lock::read_guard();
     crate::publish::list_snapshots().map_err(|e| e.to_string())
 }
 
