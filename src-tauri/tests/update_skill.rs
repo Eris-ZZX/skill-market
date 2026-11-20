@@ -165,7 +165,7 @@ fn 库替换后旧库内容可恢复() {
     let v1 = skill(d.path(), "v1/demo", "v1 原始");
     deploy_to_paths(&v1, &lib, &[target.clone()], InstallMode::Copy).unwrap();
 
-    let bak = backup_library(&lib, "demo", &backups).unwrap();
+    let bak = backup_library(&lib, "demo", &backups, None).unwrap();
     assert!(bak.is_dir(), "备份目录应存在");
     assert!(
         read(&bak.join("SKILL.md")).contains("v1 原始"),
@@ -188,8 +188,8 @@ fn 备份重名时加后缀不覆盖() {
     fs::create_dir_all(&demo).unwrap();
     write(&demo, "SKILL.md", "x");
 
-    let a = backup_library(&lib, "demo", &backups).unwrap();
-    let b = backup_library(&lib, "demo", &backups).unwrap();
+    let a = backup_library(&lib, "demo", &backups, None).unwrap();
+    let b = backup_library(&lib, "demo", &backups, None).unwrap();
     assert_ne!(a, b, "同一秒内两次备份不能互相覆盖");
     assert!(a.is_dir() && b.is_dir());
 }

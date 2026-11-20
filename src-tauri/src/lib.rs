@@ -250,6 +250,7 @@ pub fn run() {
             commands::state_health,
             commands::install_skill,
             commands::update_skill,
+            commands::resolve_conflict,
             commands::uninstall_skill,
             commands::check_updates,
             // 发布 / 历史 / 回滚
