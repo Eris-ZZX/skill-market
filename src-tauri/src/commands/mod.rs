@@ -373,6 +373,65 @@ pub async fn install_skill(
     Ok(installed)
 }
 
+/// 更新前的校验（纯函数：不碰文件系统、不碰 Tauri）
+///
+/// 放在下载**之前**，让「本地改过」这类必然失败的请求立刻返回，
+/// 不必等几十秒下载完才被拒。
+///
+/// `local_hash` 为 None 表示本地目录读不到——绝不能回退旧指纹，
+/// 否则目录被删会被误判成「本地没改」，更新时覆盖掉用户的改动。
+pub fn validate_update_preflight(
+    name: &str,
+    tool: &str,
+    snapshot: &[InstalledSkill],
+    local_hash: Option<&str>,
+) -> Result<InstalledSkill, String> {
+    let target_rec = snapshot
+        .iter()
+        .find(|r| r.tool == tool)
+        .ok_or_else(|| format!("{name} 未安装在 {tool} 上"))?
+        .clone();
+
+    // 本地导入的技能没有远端可比
+    if target_rec.source.repo_path.is_none() {
+        return Err("本地导入的技能无法更新（没有远端来源）".to_string());
+    }
+
+    // 后面所有路径都用 name 拼，校验必须在此之前
+    crate::install::require_valid_directory(name).map_err(|e| e.to_string())?;
+
+    let Some(local_hash) = local_hash else {
+        return Err("本地技能目录不存在，无法判断是否有改动".to_string());
+    };
+    if local_hash != target_rec.installed_hash {
+        return Err("本地有改动，为避免覆盖你的修改已拒绝更新。请先处理本地改动（或卸载后重装）".into());
+    }
+    Ok(target_rec)
+}
+
+/// 下载完成后的校验（纯函数）
+///
+/// 下载耗时几十秒，期间用户可能已卸载或重装。必须在任何文件操作之前
+/// 重新确认每条记录都还在且没被改动，否则会把已卸载的技能重新装回来。
+pub fn verify_records_unchanged(
+    snapshot: &[InstalledSkill],
+    current: &[InstalledSkill],
+) -> Result<(), String> {
+    for snap in snapshot {
+        let now = current
+            .iter()
+            .find(|r| r.name == snap.name && r.tool == snap.tool)
+            .ok_or_else(|| format!("{} 已被卸载，更新取消", snap.name))?;
+        if now.installed_hash != snap.installed_hash
+            || now.installed_at != snap.installed_at
+            || now.target_path != snap.target_path
+        {
+            return Err("下载期间安装记录已变化，请重试".into());
+        }
+    }
+    Ok(())
+}
+
 /// 更新一个已安装技能到远端最新版
 ///
 /// SSOT 下同名技能只存一份库内容，所以一次更新要同步该技能的所有工具记录。
@@ -395,32 +454,16 @@ pub async fn update_skill(
         (cfg, recs)
     };
 
-    let target_rec = snapshot
-        .iter()
-        .find(|r| r.tool == tool)
-        .ok_or_else(|| format!("{name} 未安装在 {tool} 上"))?
-        .clone();
-
-    // 2. 本地导入的技能没有远端可比
+    // 2-4. 本地哈希与前置校验
+    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
+    let local_hash = crate::hash::hash_dir(&library_root.join(&name)).ok();
+    let target_rec =
+        validate_update_preflight(&name, &tool, &snapshot, local_hash.as_deref())?;
     let repo_path = target_rec
         .source
         .repo_path
         .clone()
         .ok_or_else(|| "本地导入的技能无法更新（没有远端来源）".to_string())?;
-
-    // 3. 危险操作前校验名字
-    crate::install::require_valid_directory(&name).map_err(|e| e.to_string())?;
-
-    // 4. 本地哈希：目录读不到就如实报，绝不回退旧指纹
-    let library_root = crate::storage::library_dir().map_err(|e| e.to_string())?;
-    let ssot = library_root.join(&name);
-    if !ssot.is_dir() {
-        return Err(format!("本地技能目录不存在：{}", ssot.display()));
-    }
-    let local_hash = crate::hash::hash_dir(&ssot).map_err(|e| e.to_string())?;
-    if local_hash != target_rec.installed_hash {
-        return Err("本地有改动，为避免覆盖你的修改已拒绝更新。请先处理本地改动（或卸载后重装）".into());
-    }
 
     // 5. 下载新版本到临时目录（客户端已有 60 秒传输层超时）
     let targets: Vec<(std::path::PathBuf, InstallMode)> = snapshot
@@ -428,28 +471,14 @@ pub async fn update_skill(
         .map(|r| (std::path::PathBuf::from(&r.target_path), r.mode))
         .collect();
 
-    // 下载阶段不碰本地文件；拿到的暂存结果在写回前才校验记录
     let downloaded = crate::commands::market::download_skill_package(cfg, &repo_path)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 6.【必做】下载耗时几十秒，期间用户可能已卸载或重装。
-    // 必须在任何文件操作之前重新确认记录未变，否则会把已卸载的技能装回来。
+    // 6.【必做】下载期间记录可能已变；在任何文件操作之前重新确认
     {
         let guard = lock(&state)?;
-        for snap in &snapshot {
-            let current = guard
-                .installs
-                .iter()
-                .find(|r| r.name == snap.name && r.tool == snap.tool)
-                .ok_or_else(|| format!("{} 已被卸载，更新取消", snap.name))?;
-            if current.installed_hash != snap.installed_hash
-                || current.installed_at != snap.installed_at
-                || current.target_path != snap.target_path
-            {
-                return Err("下载期间安装记录已变化，请重试".into());
-            }
-        }
+        verify_records_unchanged(&snapshot, &guard.installs)?;
     }
 
     // 7. 备份当前库内容；备份是兜底而非前置条件，失败只记日志
