@@ -12,9 +12,10 @@
 //! Windows 上测试二进制的 DLL 入口解析会失败（0xC0000139
 //! STATUS_ENTRYPOINT_NOT_FOUND），整个测试二进制起不来。
 //!
-//! `deploy_downloaded` 内部用真实的 `storage::library_dir()`，所以整个二进制
-//! 通过 `XDG_CONFIG_HOME` 把应用数据目录重定向到临时目录，绝不碰
-//! 用户真实的 `~/.config`。
+//! 隔离方式：**所有会碰文件系统的被测函数都接受显式路径参数**，
+//! 每个测试自己造 tempdir。不依赖任何环境变量——`dirs::config_dir()` 在
+//! Windows 上读 `%APPDATA%`，压根不认 `XDG_CONFIG_HOME`，靠它重定向会让
+//! 测试写进用户真实数据目录，且第二次跑就因「目标已存在」失败。
 
 use skill_market_lib::commands::market::{deploy_downloaded, DownloadedSkill};
 use skill_market_lib::hash;
@@ -25,22 +26,16 @@ use skill_market_lib::install::{
 use skill_market_lib::state::InstallMode;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 
-static INIT: Once = Once::new();
-
-/// 把应用数据目录指到临时位置，并返回 `library` 根
-fn library_root() -> PathBuf {
-    INIT.call_once(|| {
-        let base = std::env::temp_dir().join(format!("skill-market-e2e-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
-        // Linux 上 dirs::config_dir() 读 XDG_CONFIG_HOME
-        std::env::set_var("XDG_CONFIG_HOME", &base);
-    });
-    let root = skill_market_lib::storage::library_dir().unwrap();
-    fs::create_dir_all(&root).unwrap();
-    root
+/// 每个测试自己的库目录
+///
+/// 必须显式创建：`deploy_to_paths` / `deploy_downloaded` 会往里写，
+/// 但不会替你建根目录（那是安装流程的事）。
+fn temp_library() -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("library");
+    fs::create_dir_all(&lib).unwrap();
+    (d, lib)
 }
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -95,7 +90,7 @@ fn link_mode() -> Option<InstallMode> {
 
 #[test]
 fn 场景1_装v1后部署v2_内容变新且哈希改变() {
-    let lib = library_root();
+    let (_lib_guard, lib) = temp_library();
     let work = tempfile::tempdir().unwrap();
     let target = work.path().join("tool").join("skills").join("e2e-s1");
 
@@ -107,7 +102,7 @@ fn 场景1_装v1后部署v2_内容变新且哈希改变() {
     let v2 = make_skill(&work.path().join("v2"), "e2e-s1", "2.0.0");
     let dl = fake_download(&v2, "2.0.0");
     let (new_hash, ver) =
-        deploy_downloaded(&dl, "e2e-s1", &[(target.clone(), InstallMode::Copy)]).unwrap();
+        deploy_downloaded(&dl, "e2e-s1", &[(target.clone(), InstallMode::Copy)], &lib).unwrap();
 
     assert!(read(&target.join("SKILL.md")).contains("2.0.0"), "副本应变新");
     assert!(
@@ -125,7 +120,7 @@ fn 场景1_装v1后部署v2_内容变新且哈希改变() {
 
 #[test]
 fn 场景5_两个工具混合模式更新后都变新() {
-    let lib = library_root();
+    let (_lib_guard, lib) = temp_library();
     let work = tempfile::tempdir().unwrap();
     let copy_target = work.path().join("a").join("skills").join("e2e-s5");
     let link_target = work.path().join("b").join("skills").join("e2e-s5");
@@ -148,6 +143,7 @@ fn 场景5_两个工具混合模式更新后都变新() {
             (copy_target.clone(), InstallMode::Copy),
             (link_target.clone(), lm),
         ],
+        &lib,
     )
     .unwrap();
 
@@ -163,7 +159,7 @@ fn 场景5_两个工具混合模式更新后都变新() {
 
 #[test]
 fn 场景6_第二个目标失败时第一个的原内容不消失() {
-    let lib = library_root();
+    let (_lib_guard, lib) = temp_library();
     let work = tempfile::tempdir().unwrap();
     let t1 = work.path().join("a").join("skills").join("e2e-s6");
 
@@ -189,6 +185,7 @@ fn 场景6_第二个目标失败时第一个的原内容不消失() {
             (t1.clone(), InstallMode::Copy),
             (blocker.join("e2e-s6"), InstallMode::Copy),
         ],
+        &lib,
     );
 
     assert!(r.is_err(), "第二个目标失败应让整体失败");
@@ -202,7 +199,7 @@ fn 场景6_第二个目标失败时第一个的原内容不消失() {
 
 #[test]
 fn 场景7_备份能恢复出当时的内容且不带_meta_json() {
-    let lib = library_root();
+    let (_lib_guard, lib) = temp_library();
     let work = tempfile::tempdir().unwrap();
     let target = work.path().join("t").join("skills").join("e2e-s7");
     let backups = work.path().join("backups");
@@ -214,7 +211,7 @@ fn 场景7_备份能恢复出当时的内容且不带_meta_json() {
     // 更新到 v2
     let v2 = make_skill(&work.path().join("v2"), "e2e-s7", "2.0.0");
     let dl = fake_download(&v2, "2.0.0");
-    deploy_downloaded(&dl, "e2e-s7", &[(target.clone(), InstallMode::Copy)]).unwrap();
+    deploy_downloaded(&dl, "e2e-s7", &[(target.clone(), InstallMode::Copy)], &lib).unwrap();
     assert!(read(&lib.join("e2e-s7").join("SKILL.md")).contains("2.0.0"));
 
     // 单独造一份 v1 的库，备份它，验证能恢复回 v1
@@ -288,7 +285,7 @@ fn 场景8_只改易变字段指纹不变() {
 
 #[test]
 fn 场景7补充_链接模式下更新不破坏链接() {
-    let lib = library_root();
+    let (_lib_guard, lib) = temp_library();
     let work = tempfile::tempdir().unwrap();
     let target = work.path().join("t").join("skills").join("e2e-s7b");
 
@@ -303,7 +300,7 @@ fn 场景7补充_链接模式下更新不破坏链接() {
 
     let v2 = make_skill(&work.path().join("v2"), "e2e-s7b", "2.0.0");
     let dl = fake_download(&v2, "2.0.0");
-    deploy_downloaded(&dl, "e2e-s7b", &[(target.clone(), mode)]).unwrap();
+    deploy_downloaded(&dl, "e2e-s7b", &[(target.clone(), mode)], &lib).unwrap();
 
     assert!(is_link(&target), "更新不该把链接换成实体目录");
     assert!(read(&target.join("SKILL.md")).contains("2.0.0"));
@@ -437,4 +434,36 @@ fn 场景4补充_多工具时任一记录消失都拒绝() {
     let partial = vec![rec("x", "cursor", "/a/x", "h1", 100)];
     let err = verify_records_unchanged(&snapshot, &partial).unwrap_err();
     assert!(err.contains("已被卸载"), "{err}");
+}
+
+// ========== 隔离守护 ==========
+
+/// 前面的测试不得往真实应用数据目录写任何东西
+///
+/// 这条自身不制造污染，只做检查：如果哪天有人又用环境变量重定向、
+/// 或者某个被测函数悄悄回退到 `storage::library_dir()`，这里会直接红。
+/// （Windows 上 `dirs::config_dir()` 读 `%APPDATA%`，不认
+/// `XDG_CONFIG_HOME`，那种做法必然漏到真实目录。）
+#[test]
+fn 测试不得污染真实_appdata() {
+    let Ok(dir) = skill_market_lib::storage::app_data_dir() else {
+        // 定位不到应用数据目录时无从检查，不算失败
+        return;
+    };
+    let lib = dir.join("library");
+    if !lib.is_dir() {
+        return;
+    }
+    let polluted: Vec<_> = fs::read_dir(&lib)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("e2e-"))
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        polluted.is_empty(),
+        "测试污染了真实 AppData: {}，库路径 {}",
+        format_args!("{polluted:?}"),
+        lib.display()
+    );
 }
