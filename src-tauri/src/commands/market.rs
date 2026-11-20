@@ -260,6 +260,60 @@ pub async fn install_from_repo(
     )
 }
 
+/// 下载到的技能包（尚未落地）
+pub struct DownloadedSkill {
+    pub dir: tempfile::TempDir,
+    pub extracted: PathBuf,
+    pub version: Option<String>,
+    pub commit: String,
+}
+
+/// 只下载并解压，不碰本地任何文件
+///
+/// 拆成两步是为了让调用方能在「下载完成」与「开始改本地」之间插入
+/// 记录校验——下载耗时几十秒，期间用户可能已经卸载了这个技能。
+pub async fn download_skill_package(
+    cfg: GitLabConfig,
+    repo_path: &str,
+) -> Result<DownloadedSkill> {
+    let client = GitLabClient::new(cfg)?;
+    let head = client.head_commit().await?;
+    let zip_bytes = client.download_skill_zip(repo_path, &head).await?;
+
+    let tmp = tempfile::tempdir()?;
+    extract_zip(&zip_bytes, tmp.path())?;
+    let extracted = find_skill_dir(tmp.path())?;
+    let version = crate::frontmatter::SkillMeta::from_dir(&extracted)
+        .ok()
+        .and_then(|m| m.version);
+
+    Ok(DownloadedSkill {
+        dir: tmp,
+        extracted,
+        version,
+        commit: head,
+    })
+}
+
+/// 把下载到的内容替换进库，并按每条记录自己的 mode 处理工具目录
+///
+/// 返回新的内容哈希与新版本号。
+pub fn deploy_downloaded(
+    dl: &DownloadedSkill,
+    name: &str,
+    targets: &[(PathBuf, InstallMode)],
+) -> Result<(String, Option<String>)> {
+    // 危险操作前校验名字：后面所有路径都用它拼
+    crate::install::require_valid_directory(name)?;
+    let _ = &dl.dir; // 临时目录守卫必须活到部署结束
+
+    let library_root = crate::storage::library_dir()?;
+    crate::install::update_deploy(&dl.extracted, &library_root, name, targets)?;
+
+    let new_hash = crate::hash::hash_dir(&library_root.join(name))?;
+    Ok((new_hash, dl.version.clone()))
+}
+
 pub fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     for i in 0..archive.len() {

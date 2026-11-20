@@ -249,11 +249,11 @@ pub fn run() {
             commands::adopt_skill,
             commands::state_health,
             commands::install_skill,
+            commands::update_skill,
             commands::uninstall_skill,
             commands::check_updates,
             // 发布 / 历史 / 回滚
-            commands::publish_skill,
-            commands::skill_history,
+            commands::publish_skill,            commands::skill_history,
             commands::list_snapshots,
             commands::rollback_skill,
             // 诊断

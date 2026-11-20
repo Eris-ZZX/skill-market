@@ -82,6 +82,24 @@ export default function InstalledPage({
     }
   };
 
+  const [updating, setUpdating] = useState<string | null>(null);
+
+  const update = async (name: string, tool: string) => {
+    setUpdating(`${name}-${tool}`);
+    setError(null);
+    try {
+      await api.updateSkill(name, tool);
+      await load();
+      // 更新后状态必须重算，否则旧蓝标会留在界面上
+      const u = await api.checkUpdates().catch(() => []);
+      onRefreshUpdates(u);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdating(null);
+    }
+  };
+
   const check = async () => {
     setLoading(true);
     setError(null);
@@ -267,19 +285,34 @@ export default function InstalledPage({
                             纳入管理
                           </button>
                         ) : (
-                          // managed 装在几个工具下就有几处可卸，交给弹层选
                           item.identity === "managed" && (
-                            <button
-                              className="danger sm"
-                              onClick={() =>
-                                setConfirmUninstall({
-                                  name: item.name,
-                                  placements: spots,
-                                })
-                              }
-                            >
-                              卸载
-                            </button>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              {/* 只有「可更新」才给入口；其余状态没有可执行的动作 */}
+                              {updateOf(item.name, spots[0].tool)?.status ===
+                                "updateavailable" && (
+                                <button
+                                  className="primary sm"
+                                  disabled={updating === `${item.name}-${spots[0].tool}`}
+                                  onClick={() => update(item.name, spots[0].tool)}
+                                >
+                                  {updating === `${item.name}-${spots[0].tool}` && (
+                                    <span className="spinner" />
+                                  )}
+                                  更新
+                                </button>
+                              )}
+                              <button
+                                className="danger sm"
+                                onClick={() =>
+                                  setConfirmUninstall({
+                                    name: item.name,
+                                    placements: spots,
+                                  })
+                                }
+                              >
+                                卸载
+                              </button>
+                            </div>
                           )
                         )}
                       </td>
