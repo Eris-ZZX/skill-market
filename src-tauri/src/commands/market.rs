@@ -297,18 +297,23 @@ pub async fn download_skill_package(
 
 /// 把下载到的内容替换进库，并按每条记录自己的 mode 处理工具目录
 ///
+/// `library_root` 由调用方给出而不是内部读 `storage::library_dir()`：
+/// 生产代码传真实库路径，测试传 tempdir。否则测试在 Windows 上会写到
+/// `%APPDATA%`（`XDG_CONFIG_HOME` 对 `dirs::config_dir()` 无效），
+/// 既污染用户数据又让测试第二次跑就失败。
+///
 /// 返回新的内容哈希与新版本号。
 pub fn deploy_downloaded(
     dl: &DownloadedSkill,
     name: &str,
     targets: &[(PathBuf, InstallMode)],
+    library_root: &Path,
 ) -> Result<(String, Option<String>)> {
     // 危险操作前校验名字：后面所有路径都用它拼
     crate::install::require_valid_directory(name)?;
     let _ = &dl.dir; // 临时目录守卫必须活到部署结束
 
-    let library_root = crate::storage::library_dir()?;
-    crate::install::update_deploy(&dl.extracted, &library_root, name, targets)?;
+    crate::install::update_deploy(&dl.extracted, library_root, name, targets)?;
 
     let new_hash = crate::hash::hash_dir(&library_root.join(name))?;
     Ok((new_hash, dl.version.clone()))

@@ -504,7 +504,7 @@ pub async fn update_skill(
 
     // 8-9. 替换库并按记录各自的 mode 处理工具目录
     let (new_hash, new_version) =
-        crate::commands::market::deploy_downloaded(&downloaded, &name, &targets)
+        crate::commands::market::deploy_downloaded(&downloaded, &name, &targets, &library_root)
             .map_err(|e| e.to_string())?;
 
     // 10. 同名技能可能装在多个工具，库只有一份，全部记录一起更新
@@ -616,7 +616,7 @@ pub async fn resolve_conflict(
     match choice {
         ConflictChoice::UseRemote => {
             // 备份已在上面落盘，这里直接覆盖
-            apply_remote(&downloaded, &name, &snapshot)?;
+            apply_remote(&downloaded, &name, &snapshot, &library_root)?;
             let hash = crate::hash::hash_dir(&library_root.join(&name))
                 .map_err(|e| e.to_string())?;
             write_after_resolve(
@@ -638,7 +638,7 @@ pub async fn resolve_conflict(
                 .map_err(|e| e.to_string())?;
             crate::install::restore_backup_as(&backup_dir, &library_root, &local_name)
                 .map_err(|e| e.to_string())?;
-            apply_remote(&downloaded, &name, &snapshot)?;
+            apply_remote(&downloaded, &name, &snapshot, &library_root)?;
             let hash = crate::hash::hash_dir(&library_root.join(&name))
                 .map_err(|e| e.to_string())?;
             write_after_resolve(
@@ -678,12 +678,13 @@ fn apply_remote(
     downloaded: &crate::commands::market::DownloadedSkill,
     name: &str,
     snapshot: &[InstalledSkill],
+    library_root: &std::path::Path,
 ) -> Result<(), String> {
     let targets: Vec<(std::path::PathBuf, InstallMode)> = snapshot
         .iter()
         .map(|r| (std::path::PathBuf::from(&r.target_path), r.mode))
         .collect();
-    crate::commands::market::deploy_downloaded(downloaded, name, &targets)
+    crate::commands::market::deploy_downloaded(downloaded, name, &targets, library_root)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
