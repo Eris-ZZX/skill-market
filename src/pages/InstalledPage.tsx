@@ -43,8 +43,6 @@ interface Props {
   onNavigateSettings?: () => void;
 }
 
-type View = "bySkill" | "byTool" | "matrix";
-
 export default function InstalledPage({
   tools,
   updates,
@@ -56,7 +54,6 @@ export default function InstalledPage({
   const [health, setHealth] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>("bySkill");
   // 矩阵里点未装格子时打开的安装弹窗
   const [installTarget, setInstallTarget] = useState<{
     skill: RemoteSkill;
@@ -220,19 +217,6 @@ export default function InstalledPage({
     [items, updates, filters],
   );
 
-  // 按工具分组时直接携带落盘配对，避免后面用 indexOf 反查路径
-  const byTool = useMemo(() => {
-    const map = new Map<string, { item: MySkillItem; spot: SkillPlacement }[]>();
-    filtered.forEach((i) => {
-      placements(i).forEach((spot) => {
-        const arr = map.get(spot.tool) ?? [];
-        arr.push({ item: i, spot });
-        map.set(spot.tool, arr);
-      });
-    });
-    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filtered]);
-
   // 与侧边栏角标共用同一口径，两处数字在任何时刻都相等
   const pendingCount = countPending(items, updates);
 
@@ -365,10 +349,19 @@ export default function InstalledPage({
     }
   };
 
-  const statusBadge = (item: MySkillItem) => {
+  /**
+   * 更新状态标记
+   *
+   * `showExternalMark` 为 false 时，外部管理的技能不返回任何标记——矩阵的
+   * 操作列已经显示「外部管理」，这里再显示一次就是重复。
+   */
+  const statusBadge = (item: MySkillItem, showExternalMark = true) => {
     // 外部管理的技能不参与更新判定（不是本客户端装的，改不改变无从比较）
-    if (item.externallyManaged)
-      return <span className="badge">外部管理</span>;
+    if (item.externallyManaged) {
+      return showExternalMark ? (
+        <span className="badge">外部管理</span>
+      ) : null;
+    }
 
     // 无来源时 check_updates 会返回 UpToDate，那是「没得比」而不是「最新」。
     // 显示「最新」等于骗用户，必须如实说无来源。
@@ -531,179 +524,9 @@ export default function InstalledPage({
             <span className="page-sub" style={{ whiteSpace: "nowrap" }}>
               显示 {filtered.length} / {items.length}
             </span>
-            <div style={{ display: "flex", gap: 0 }}>
-              <button
-                className={view === "bySkill" ? "primary sm" : "sm"}
-                style={{ borderRadius: "6px 0 0 0" }}
-                onClick={() => setView("bySkill")}
-              >
-                按技能
-              </button>
-              <button
-                className={view === "byTool" ? "primary sm" : "sm"}
-                style={{ borderRadius: 0, marginLeft: -1 }}
-                onClick={() => setView("byTool")}
-              >
-                按工具
-              </button>
-              <button
-                className={view === "matrix" ? "primary sm" : "sm"}
-                style={{ borderRadius: "0 6px 6px 0", marginLeft: -1 }}
-                onClick={() => setView("matrix")}
-              >
-                矩阵
-              </button>
-            </div>
           </div>
 
-          {view === "bySkill" ? (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>技能</th>
-                  <th>已装工具</th>
-                  <th>身份</th>
-                  <th>版本</th>
-                  <th style={{ width: 150 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((item) => {
-                  const spots = placements(item);
-                  return (
-                    <tr key={item.name}>
-                      <td style={{ fontWeight: 500 }}>
-                        {item.name}
-                        {item.description && (
-                          <div className="page-sub">{item.description}</div>
-                        )}
-                      </td>
-                      <td>
-                        <div className="card-meta">
-                          {spots.map((p) => (
-                            <span key={p.tool} className="badge tool-chip">
-                              {toolLabel(p.tool, tools)}
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                      <td>{statusBadge(item)}</td>
-                      <td>{item.installedVersion ?? item.version ?? "—"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }}>
-                          {/* 只有「可更新」才给直接更新入口 */}
-                          {updateOf(item.name, spots[0].tool)?.status ===
-                            "updateavailable" && (
-                            <button
-                              className="primary sm"
-                              disabled={updating === `${item.name}-${spots[0].tool}`}
-                              onClick={() => update(item.name, spots[0].tool)}
-                            >
-                              {updating === `${item.name}-${spots[0].tool}` && (
-                                <span className="spinner" />
-                              )}
-                              更新
-                            </button>
-                          )}
-                          {/* 冲突与已修改都需要用户选一个处理方式 */}
-                          {(() => {
-                            const u = updateOf(item.name, spots[0].tool);
-                            if (!u) return null;
-                            if (u.status !== "conflict" && u.status !== "locallymodified")
-                              return null;
-                            if (u.ignored)
-                              return <span className="page-sub">已忽略此次更新</span>;
-                            return (
-                              <button
-                                className="primary sm"
-                                onClick={() =>
-                                  setResolving({
-                                    name: item.name,
-                                    tool: spots[0].tool,
-                                    status: u.status,
-                                  })
-                                }
-                              >
-                                处理
-                              </button>
-                            );
-                          })()}
-                          <button
-                            className="danger sm"
-                            onClick={() =>
-                              setConfirmUninstall({
-                                name: item.name,
-                                placements: spots,
-                              })
-                            }
-                          >
-                            卸载
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : view === "byTool" ? (
-            byTool.map(([tool, rows]) => (
-              <div key={tool} style={{ marginBottom: 20 }}>
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    marginBottom: 8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                  }}
-                >
-                  {toolLabel(tool, tools)}
-                  <span className="badge">{rows.length}</span>
-                </div>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>技能</th>
-                      <th>版本</th>
-                      <th>身份</th>
-                      <th style={{ width: 150 }}></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map(({ item: it, spot }) => (
-                      <tr key={`${it.name}-${spot.tool}`}>
-                        <td>
-                          <div style={{ fontWeight: 500 }}>{it.name}</div>
-                          {it.description && (
-                            <div className="page-sub">{it.description}</div>
-                          )}
-                        </td>
-                        <td>{it.installedVersion ?? it.version ?? "—"}</td>
-                        <td>{statusBadge(it)}</td>
-                        <td>
-                          <button
-                            className="danger sm"
-                            onClick={() =>
-                              setConfirmUninstall({
-                                name: it.name,
-                                placements: [spot],
-                              })
-                            }
-                          >
-                            卸载
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))
-          ) : (
-            <>
-              {openColumn && (
+          {openColumn && (
                 <div className="matrix-popover">
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>
                     {toolLabel(openColumn, tools)}
@@ -795,7 +618,19 @@ export default function InstalledPage({
                 {filtered.map((item) => (
                   <tr key={`${item.name}-${item.targetPaths[0] ?? ""}`}>
                     <td className="matrix-name">
-                      <div style={{ fontWeight: 500 }}>{item.name}</div>
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 8 }}
+                      >
+                        <span style={{ fontWeight: 500 }}>{item.name}</span>
+                        {/* 外部管理标记在操作列，这里只显示更新状态 */}
+                        {statusBadge(item, false)}
+                        <span
+                          className="page-sub"
+                          style={{ marginLeft: "auto", whiteSpace: "nowrap" }}
+                        >
+                          {item.installedVersion ?? item.version ?? "—"}
+                        </span>
+                      </div>
                       {item.description && (
                         <div className="page-sub">{item.description}</div>
                       )}
@@ -817,6 +652,48 @@ export default function InstalledPage({
                         {item.externallyManaged && (
                           <span className="badge">外部管理</span>
                         )}
+                        {/* 状态标记在名称旁，操作入口在这里——看到「可更新」就要能点 */}
+                        {(() => {
+                          const first = item.tools[0];
+                          if (!first) return null;
+                          const u = updateOf(item.name, first);
+                          if (!u) return null;
+                          if (u.status === "updateavailable") {
+                            return (
+                              <button
+                                className="primary sm"
+                                disabled={updating === `${item.name}-${first}`}
+                                onClick={() => update(item.name, first)}
+                              >
+                                {updating === `${item.name}-${first}` && (
+                                  <span className="spinner" />
+                                )}
+                                更新
+                              </button>
+                            );
+                          }
+                          if (
+                            (u.status === "conflict" ||
+                              u.status === "locallymodified") &&
+                            !u.ignored
+                          ) {
+                            return (
+                              <button
+                                className="primary sm"
+                                onClick={() =>
+                                  setResolving({
+                                    name: item.name,
+                                    tool: first,
+                                    status: u.status,
+                                  })
+                                }
+                              >
+                                处理
+                              </button>
+                            );
+                          }
+                          return null;
+                        })()}
                         <button
                           className="ghost sm"
                           title="批量操作"
@@ -875,8 +752,6 @@ export default function InstalledPage({
                 ))}
               </tbody>
             </table>
-            </>
-          )}
         </>
       )}
 
