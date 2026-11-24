@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import BackupDialog from "../components/BackupDialog";
 import ErrorBanner from "../components/ErrorBanner";
 import InstallDialog from "../components/InstallDialog";
+import UpdateDialog from "../components/UpdateDialog";
 import { MatrixCell, MatrixHeader } from "../components/MatrixCell";
 import {
   api,
@@ -18,6 +19,7 @@ import {
   FilterState,
   StatusFilter,
   IdentityFilter,
+  pendingUpdates,
   placements,
   RemoteFailure,
   SkillPlacement,
@@ -156,6 +158,7 @@ export default function InstalledPage({
   const [resyncing, setResyncing] = useState(false);
   const [resyncResult, setResyncResult] = useState<string | null>(null);
   const [showBackups, setShowBackups] = useState(false);
+  const [showUpdates, setShowUpdates] = useState(false);
 
   /**
    * 检查并修复「记录还在但目录没了」的技能
@@ -205,6 +208,42 @@ export default function InstalledPage({
     }
   };
 
+  /** 点「检查更新」：先真实刷新一次，再打开弹窗——按钮上写检查，就得真检查 */
+  const checkAndOpen = async () => {
+    await check();
+    setShowUpdates(true);
+  };
+
+  /**
+   * 全部更新（只针对 updateavailable）
+   *
+   * 逐条独立：用循环而不是批量接口，一条失败不影响其余——与 #32 的
+   * 批量安装同一原则。冲突与已修改不在此列，它们需要用户做选择。
+   */
+  const updateAll = async () => {
+    const targets = pendingRows.filter((r) => r.status === "updateavailable");
+    if (targets.length === 0) return;
+    setLoading(true);
+    setError(null);
+    const failures: string[] = [];
+    try {
+      for (const t of targets) {
+        try {
+          await api.updateSkill(t.name, t.tool);
+        } catch (e) {
+          failures.push(`${t.name}（${parseError(e).message}）`);
+        }
+      }
+      await load();
+      await refreshUpdates();
+      if (failures.length > 0) {
+        setError(`全部更新完成，但 ${failures.length} 项失败：${failures.join("；")}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const updateOf = (name: string, tool: string) =>
     updates.find((u) => u.name === name && u.tool === tool);
 
@@ -219,6 +258,14 @@ export default function InstalledPage({
 
   // 与侧边栏角标共用同一口径，两处数字在任何时刻都相等
   const pendingCount = countPending(items, updates);
+
+  // 弹窗用的列表：「一眼看全部」需要的数据。
+  // 与矩阵里的就地「更新」是两条入口、同一个 update()。
+  const pendingRows = useMemo(
+    () => pendingUpdates(items, updates),
+    [items, updates],
+  );
+  const hasConflict = pendingRows.some((r) => r.status === "conflict");
 
   // 只显示本机已装的工具列：6 列 × 36px 在 640px 窗口里会挤
   const matrixTools = useMemo(
@@ -417,9 +464,17 @@ export default function InstalledPage({
           {resyncing && <span className="spinner" />}
           检查并修复
         </button>
-        <button onClick={check} disabled={loading}>
+        <button onClick={checkAndOpen} disabled={loading}>
           {loading && <span className="spinner" />}
           检查更新
+          {pendingRows.length > 0 && (
+            <span
+              className={`nav-badge ${hasConflict ? "warn" : ""}`}
+              style={{ marginLeft: 4 }}
+            >
+              {pendingRows.length}
+            </span>
+          )}
         </button>
       </div>
 
@@ -831,6 +886,21 @@ export default function InstalledPage({
             </div>
           </div>
         </div>
+      )}
+
+      {showUpdates && (
+        <UpdateDialog
+          rows={pendingRows}
+          tools={tools}
+          updating={updating}
+          onUpdate={(name, tool) => void update(name, tool)}
+          onResolve={(name, tool, status) => {
+            setShowUpdates(false);
+            setResolving({ name, tool, status });
+          }}
+          onUpdateAll={() => void updateAll()}
+          onClose={() => setShowUpdates(false)}
+        />
       )}
 
       {showBackups && (

@@ -503,6 +503,53 @@ export function countPending(
   }).length;
 }
 
+/** 弹窗里的一行：某个技能在某个工具下需要关注 */
+export interface PendingRow {
+  name: string;
+  tool: string;
+  status: "updateavailable" | "conflict" | "locallymodified";
+  installedVersion: string | null;
+  remoteVersion: string | null;
+}
+
+/**
+ * 挑出需要在「检查更新」弹窗里列出的记录
+ *
+ * 只收三种状态：可更新、需处理、已修改。`remotemissing` / `localmissing`
+ * 不在这里——前者是远端删了（不是「能更新」），后者是本地目录没了
+ * （要的是「检查并修复」而不是更新）。
+ *
+ * 无来源与外部管理的技能一律排除：前者没有可比的对象，后者不是本客户端
+ * 装的，替人升级会动到别人的东西。
+ */
+export function pendingUpdates(
+  items: MySkillItem[],
+  updates: UpdateCheckItem[],
+): PendingRow[] {
+  const out: PendingRow[] = [];
+  for (const item of items) {
+    if (item.externallyManaged || !item.hasRemoteSource) continue;
+    for (const p of placements(item)) {
+      const u = updates.find((x) => x.name === item.name && x.tool === p.tool);
+      if (!u || u.ignored) continue;
+      if (
+        u.status === "updateavailable" ||
+        u.status === "conflict" ||
+        u.status === "locallymodified"
+      ) {
+        out.push({
+          name: item.name,
+          tool: p.tool,
+          status: u.status,
+          installedVersion: u.installedVersion,
+          remoteVersion: u.remoteVersion,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /** 需要警示的条数（冲突 + 本地缺失） */
 export function countAlerts(updates: UpdateCheckItem[]): number {
   return updates.filter(

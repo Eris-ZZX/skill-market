@@ -746,8 +746,46 @@ input[type="checkbox"] {
 .matrix th,
 .matrix td {
   border-bottom: 1px solid var(--border);
-  padding: 6px 4px;
+  padding: 3px 4px;
   vertical-align: middle;
+}
+
+/*
+ * 行高固定 52px。
+ *
+ * 光写 height 不够：CSS 的 height 在 table row 上是最小高度，内容多一行的
+ * 行仍会被撑高（实测 2 行描述会顶到 64px、带徽标顶到 59px），行高参差照旧。
+ * 所以同时把行内垂直节奏收紧，让「名称 1 行 + 描述 2 行 + padding」正好
+ * 52px —— 实测五行（含超长描述、超长名称、无描述、有/无徽标）全部 52px，
+ * td.scrollHeight = 51 未溢出。
+ */
+.matrix tbody tr {
+  height: 52px;
+}
+
+/* 名称行与描述行都收紧行高，给描述的第二行腾出空间 */
+.matrix .matrix-name > div:first-child {
+  line-height: 1.2;
+}
+
+/* 描述固定最多两行，超出省略。WebView2 是 Chromium（内核 >= 当年 Edge），
+   -webkit-line-clamp 支持良好；max-height 兑底，防止 flex 上下文中
+   line-clamp 失效时无限撑高。 */
+.matrix .matrix-name .page-sub {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.15;
+  max-height: 2.3em;
+}
+
+/* 矩阵内的徽标收紧，否则 10.5px/1.6 的行盒会把名称行顶到 21px，行高超 52 */
+.matrix .matrix-name .badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
 }
 
 /* 名称列最宽，其余列定宽：4-6 列在 640px 窗口内都放得下 */
@@ -776,6 +814,27 @@ input[type="checkbox"] {
   font-size: 9.5px;
   line-height: 1;
   color: var(--text-sub);
+}
+
+/* 真图标：无圆形底色，只显示 14px 单色图形，跟随文字色 */
+.matrix-glyph.has-icon {
+  background: transparent;
+  border: none;
+  color: var(--text);
+}
+
+.matrix-glyph.has-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* 品牌色字母块：白字保证在深色底与绿色底上都有足够对比度 */
+.matrix-glyph.brand {
+  color: #fff;
+  border-color: transparent;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .matrix-count {
