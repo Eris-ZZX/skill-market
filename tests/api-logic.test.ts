@@ -14,10 +14,11 @@ import {
   type UpdateStatus,
 } from "../src/api.ts";
 
+/// #66 后没有三分类：`kind` 只用来表达「有来源 / 无来源 / 外部管理」
 function item(
   name: string,
   tools: string[],
-  identity: MySkillItem["identity"],
+  kind: "managed" | "external" | "local",
   targetPaths?: string[],
 ): MySkillItem {
   return {
@@ -26,7 +27,10 @@ function item(
     targetPaths: targetPaths ?? tools.map((t) => `/home/u/.${t}/skills/${name}`),
     description: "",
     version: null,
-    identity,
+    identity: "installed",
+    externallyManaged: kind === "external",
+    // local 视作无来源，managed 视作有来源
+    hasRemoteSource: kind === "managed",
     status: null,
     installedVersion: null,
   };
@@ -58,12 +62,13 @@ test("placements 在数组短于 tools 时不给错路径", () => {
   assert.equal(got[1].targetPath, "", "缺失的路径应为空，而不是回退到第一个");
 });
 
-test("local 技能计入待处理，external 不计", () => {
+test("无来源与外部管理都不计入待处理", () => {
+  // #66 后 local 表示「无来源」，没有可比的状态，不该算待处理
   const items = [
     item("local-skill", ["claude"], "local"),
     item("ext-skill", ["codex"], "external"),
   ];
-  assert.equal(countPending(items, []), 1);
+  assert.equal(countPending(items, []), 0);
 });
 
 test("managed 按需处理状态计数，且看每个工具", () => {
@@ -116,5 +121,6 @@ test("同一份输入在任何调用下结果稳定", () => {
   ];
   const updates = [upd("b", "agents", "conflict")];
   assert.equal(countPending(items, updates), countPending(items, updates));
-  assert.equal(countPending(items, updates), 2);
+  // 只有 b 有来源且状态需处理；a 无来源不计入
+  assert.equal(countPending(items, updates), 1);
 });

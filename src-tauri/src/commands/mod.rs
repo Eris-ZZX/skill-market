@@ -163,9 +163,22 @@ pub struct MySkillItem {
     pub target_paths: Vec<String>,
     pub description: String,
     pub version: Option<String>,
-    /// managed | external | local
+    /// 恒为 "installed"
+    ///
+    /// 保留字段只是为了让前端现有类型继续编译。三分类已废弃（#66）：
+    /// 「纳入管理」不改变任何实质能力，`repo_path` 写入 null 后仍然永远
+    /// 不能更新，等于安慰剂按钮。
     pub identity: String,
-    /// 仅 managed 有值：其余身份没有可比的来源，判不了就不猜
+    /// 该技能由外部工具（如 cc-switch）管理，本客户端不应卸载
+    ///
+    /// 这是从旧三分类里保留下来的**唯一**语义：卸载会动到别人的东西。
+    pub externally_managed: bool,
+    /// 该技能是否有远端来源（任一工具记录有 repoPath）
+    ///
+    /// 无来源时 `check_updates` 会返回 `UpToDate`，那是「没得比」而不是
+    /// 「最新」——界面必须据此显示「无来源」，否则是在误导用户。
+    pub has_remote_source: bool,
+    /// 仅 has_remote_source 为真时有意义
     pub status: Option<UpdateStatus>,
     pub installed_version: Option<String>,
 }
@@ -174,32 +187,33 @@ pub struct MySkillItem {
 ///
 /// 优先级 managed > external > local。external 还需目标路径不在本应用
 /// 数据目录下——指向自己 library 的重解析点是本客户端自己的 junction。
-pub fn judge_identity(
-    target_path: &str,
-    tool: &str,
+/// 该落盘是否由外部工具管理
+///
+/// 这是旧「三分类」里唯一值得保留的语义：外部工具（cc-switch 等）用软链
+/// 把同一份内容链进多个工具目录，本客户端一卸载就动了别人的东西。
+///
+/// 判定分支：
+/// - 不是链接 -> false
+/// - 链接目标在本应用数据目录下 -> false（那是本客户端自己的 junction）
+/// - 链接目标在别处 -> true
+/// - 链接但读不到目标 -> true（保守：看不见的东西不该动）
+///
+/// 注意：调用方需要先排除「本客户端有安装记录」的情况——自己装的东西
+/// 即使是指向 library 之外的链接，也归自己管。这个判断在聚合层做。
+pub fn is_externally_managed(
     is_link: bool,
     link_target: Option<&str>,
-    installs: &[InstalledSkill],
     app_data: Option<&str>,
-) -> &'static str {
-    let managed = installs
-        .iter()
-        .any(|r| r.tool == tool && r.target_path == target_path);
-    if managed {
-        return "managed";
+) -> bool {
+    if !is_link {
+        return false;
     }
-    if is_link {
-        // 只看到软链但读不到目标时，保守地当成外部管理：不该动它
-        let outside = match (link_target, app_data) {
-            (Some(t), Some(base)) => !t.starts_with(base),
-            (None, _) => true,
-            (Some(_), None) => true,
-        };
-        if outside {
-            return "external";
-        }
+    match (link_target, app_data) {
+        (Some(t), Some(base)) => !t.starts_with(base),
+        // 读不到目标，或不知道应用目录在哪：都当外部管理
+        (None, _) => true,
+        (Some(_), None) => true,
     }
-    "local"
 }
 
 /// 扫描本机所有技能，按技能名聚合成「我的技能」列表
@@ -230,17 +244,11 @@ pub fn build_my_skills(
     let mut out = Vec::with_capacity(scanned.len());
 
     for s in scanned {
-        // 一个技能可能装在多个工具下，身份取最高优先级
-        let rank = |id: &str| match id {
-            "managed" => 2,
-            "external" => 1,
-            _ => 0,
-        };
-
-        let mut identity = "local".to_string();
         let mut installed_version = None;
         let mut tools = Vec::new();
         let mut target_paths = Vec::new();
+        let mut externally_managed = false;
+        let mut has_remote_source = false;
 
         let placements = if s.placements.is_empty() {
             // 兼容手工构造的扫描结果（只有一个落盘）
@@ -255,22 +263,21 @@ pub fn build_my_skills(
         };
 
         for p in &placements {
-            let id = judge_identity(
-                &p.target_path,
-                &p.tool,
-                p.is_link,
-                p.link_target.as_deref(),
-                installs,
-                app_data,
-            );
-            if rank(id) > rank(&identity) {
-                identity = id.to_string();
-            }
-            if let Some(rec) = installs
+            let rec = installs
                 .iter()
-                .find(|r| r.tool == p.tool && r.target_path == p.target_path)
+                .find(|r| r.tool == p.tool && r.target_path == p.target_path);
+
+            // 本客户端有记录的东西归自己管，即使它是指向 library 之外的
+            // 链接——那是用户自己选的部署方式，不该被当成「别人的」拒绝卸载
+            if rec.is_none() && is_externally_managed(p.is_link, p.link_target.as_deref(), app_data)
             {
-                installed_version = rec.installed_version.clone();
+                externally_managed = true;
+            }
+            if rec.is_some_and(|r| r.source.repo_path.is_some()) {
+                has_remote_source = true;
+            }
+            if let Some(r) = rec {
+                installed_version = r.installed_version.clone();
             }
             tools.push(p.tool.clone());
             target_paths.push(p.target_path.clone());
@@ -282,7 +289,9 @@ pub fn build_my_skills(
             target_paths,
             description: s.description.clone(),
             version: s.version.clone(),
-            identity,
+            identity: "installed".to_string(),
+            externally_managed,
+            has_remote_source,
             status: None,
             installed_version,
         });
@@ -322,7 +331,11 @@ pub fn adopt_record(name: String, tool: String, target_path: String) -> Result<I
     })
 }
 
-/// 把扫描到的「本地已有」技能纳入管理
+/// 已废弃：界面不再提供入口。#66 起所有技能统一视为已安装。
+///
+/// 保留命令是因为可能有外部调用方。它写入的 `repo_path` 恒为 None，
+/// 所以纳管后 `check_updates` 仍然永远判 UpToDate——这正是当初
+/// 「点 75 次什么也得不到」的原因。
 #[tauri::command]
 pub fn adopt_skill(
     state: State<'_, AppState>,

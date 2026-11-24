@@ -16,10 +16,11 @@ import {
   type UpdateStatus,
 } from "../src/api.ts";
 
+/// #66 后没有三分类。"external" 只用来构造 externallyManaged=true 的条目
 function item(
   name: string,
   tools: string[],
-  identity: MySkillItem["identity"] = "managed",
+  identity: "managed" | "external" | "local" = "managed",
   description = "",
 ): MySkillItem {
   return {
@@ -28,7 +29,9 @@ function item(
     targetPaths: tools.map((t) => `/home/u/.${t}/skills/${name}`),
     description,
     version: null,
-    identity,
+    identity: "installed",
+    externallyManaged: identity === "external",
+    hasRemoteSource: true,
     status: null,
     installedVersion: null,
   };
@@ -142,7 +145,7 @@ test("tool 筛选只看装在该工具下的", () => {
 
 // ========== 身份 ==========
 
-test("identity 筛选", () => {
+test("identity 筛选只剩 external 一种", () => {
   const items = [
     item("a", ["cursor"], "managed"),
     item("b", ["cursor"], "external"),
@@ -151,10 +154,12 @@ test("identity 筛选", () => {
   assert.deepEqual(
     applyFilters(items, [], f({ identity: "external" })).map((i) => i.name),
     ["b"],
+    "只看外部管理的应只返回 b",
   );
   assert.deepEqual(
-    applyFilters(items, [], f({ identity: "local" })).map((i) => i.name),
-    ["c"],
+    applyFilters(items, [], f({ identity: "all" })).map((i) => i.name),
+    ["a", "b", "c"],
+    "全部时三条都在",
   );
 });
 
@@ -163,18 +168,18 @@ test("identity 筛选", () => {
 test("多条件是 AND", () => {
   const items = [
     item("a", ["cursor"], "managed"),
-    item("b", ["cursor"], "local"),
-    item("c", ["claude"], "managed"),
+    item("b", ["cursor"], "external"),
+    item("c", ["claude"], "external"),
   ];
   const updates = [
     upd("a", "cursor", "updateavailable"),
     upd("b", "cursor", "updateavailable"),
   ];
-  // 同时要求：有更新 + 装在 cursor + 本工具管理
+  // 同时要求：有更新 + 装在 cursor + 外部管理
   assert.deepEqual(
-    applyFilters(items, updates, f({ status: "updates", tool: "cursor", identity: "managed" }))
+    applyFilters(items, updates, f({ status: "updates", tool: "cursor", identity: "external" }))
       .map((i) => i.name),
-    ["a"],
+    ["b"],
   );
 });
 
@@ -184,8 +189,8 @@ test("query 与其它条件叠加", () => {
     item("grill-me-x", ["cursor"], "external", "别的"),
     item("dws", ["cursor"], "managed", "报表"),
   ];
-  const r = applyFilters(items, [], f({ query: "grill", identity: "managed" }));
-  assert.deepEqual(r.map((i) => i.name), ["grill-me"], "query 与 identity 要同时满足");
+  const r = applyFilters(items, [], f({ query: "grill", identity: "external" }));
+  assert.deepEqual(r.map((i) => i.name), ["grill-me-x"], "query 与 identity 要同时满足");
 });
 
 test("query 匹配描述也能命中", () => {

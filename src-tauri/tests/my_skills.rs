@@ -1,15 +1,24 @@
-//! 「我的技能」的身份判定与聚合
+//! 「我的技能」的聚合与外部管理标记
 //!
-//! 三种身份决定界面能对这条技能做什么：managed 可判更新，external 不许动，
-//! local 可以「纳入管理」。判错会导致我们修改别人的软链目标。
+//! #66 起不再分「本工具管理 / 外部管理 / 本地已有」三类——所有扫到的技能
+//! 一律视为已安装。保留下来唯一条语义是「外部管理」：cc-switch 用软链把
+//! 同一份内容链进多个工具目录，本客户端一卸载就动了别人的东西。
+//!
+//! 另一个新增字段是 `has_remote_source`：无来源时 `check_updates` 返回
+//! UpToDate，那是「没得比」而不是「最新」，界面必须据此区分。
 
-use skill_market_lib::commands::{build_my_skills, judge_identity, MySkillItem};
-use skill_market_lib::scan::ScannedSkill;
+use skill_market_lib::commands::{build_my_skills, is_externally_managed, MySkillItem};
+use skill_market_lib::scan::{ScannedSkill, SkillPlacement};
 use skill_market_lib::state::{InstallMode, InstalledSkill, SkillSource, SourceKind};
 
 const APP_DATA: &str = "/home/u/.config/skill-market";
 
-fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
+fn rec_with_source(
+    name: &str,
+    tool: &str,
+    target: &str,
+    repo_path: Option<&str>,
+) -> InstalledSkill {
     InstalledSkill {
         name: name.into(),
         tool: tool.into(),
@@ -18,9 +27,13 @@ fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
         installed_hash: "h".into(),
         installed_version: None,
         source: SkillSource {
-            kind: SourceKind::Local,
+            kind: if repo_path.is_some() {
+                SourceKind::Gitlab
+            } else {
+                SourceKind::Local
+            },
             repo_url: None,
-            repo_path: None,
+            repo_path: repo_path.map(|s| s.to_string()),
             branch: None,
             commit: None,
         },
@@ -29,10 +42,12 @@ fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
     }
 }
 
+fn rec(name: &str, tool: &str, target: &str) -> InstalledSkill {
+    rec_with_source(name, tool, target, None)
+}
 
-/// 构造一个落盘位置
-fn spot(tool: &str, path: &str, is_link: bool, link: Option<&str>) -> skill_market_lib::scan::SkillPlacement {
-    skill_market_lib::scan::SkillPlacement {
+fn spot(tool: &str, path: &str, is_link: bool, link: Option<&str>) -> SkillPlacement {
+    SkillPlacement {
         tool: tool.into(),
         target_path: path.into(),
         is_link,
@@ -57,125 +72,177 @@ fn scanned(name: &str, tool: &str, target: &str, is_link: bool, link: Option<&st
     }
 }
 
-#[test]
-fn managed_优先于其它身份() {
-    // 有记录且路径一致 → managed，哪怕它是软链
-    let id = judge_identity(
-        "/home/u/.claude/skills/x",
-        "claude",
-        true,
-        Some("/somewhere/else/x"),
-        &[rec("x", "claude", "/home/u/.claude/skills/x")],
-        Some(APP_DATA),
+/// 一条技能装在两处的聚合形态
+fn two_placements(name: &str, a: SkillPlacement, b: SkillPlacement) -> ScannedSkill {
+    let mut s = scanned(
+        name,
+        &a.tool,
+        &a.target_path,
+        a.is_link,
+        a.link_target.as_deref(),
     );
-    assert_eq!(id, "managed");
+    s.placements = vec![a.clone(), b.clone()];
+    s.found_in = vec![a.tool.clone(), b.tool.clone()];
+    s
+}
+
+// ========== is_externally_managed 的分支 ==========
+
+#[test]
+fn 不是链接不算外部管理() {
+    assert!(!is_externally_managed(false, None, Some(APP_DATA)));
+    // 即使带了链接目标，只要 is_link 为 false 就不算
+    assert!(!is_externally_managed(false, Some("/x"), Some(APP_DATA)));
 }
 
 #[test]
-fn 记录存在但路径不一致不算_managed() {
-    // 同名同工具但 target_path 不同：旧记录已失效，不能据此认定由本工具管理
-    let id = judge_identity(
-        "/home/u/.claude/skills/x",
-        "claude",
-        false,
-        None,
-        &[rec("x", "claude", "/home/u/.claude/skills/old-x")],
-        Some(APP_DATA),
-    );
-    assert_eq!(id, "local");
-}
-
-#[test]
-fn 指向应用外部的软链是_external() {
-    let id = judge_identity(
-        "/home/u/.claude/skills/x",
-        "claude",
-        true,
-        Some("/home/u/.cc-switch/skills/x"),
-        &[],
-        Some(APP_DATA),
-    );
-    assert_eq!(id, "external");
-}
-
-#[test]
-fn 指向应用自身数据目录的软链是本工具_junction() {
-    // library 下的 junction 是本客户端自己建的，应算 local 而不是 external
-    let id = judge_identity(
-        "/home/u/.claude/skills/x",
-        "claude",
+fn 指向应用自身数据目录的软链不算外部管理() {
+    // library 下的 junction 是本客户端自己建的
+    assert!(!is_externally_managed(
         true,
         Some("/home/u/.config/skill-market/library/x"),
-        &[],
         Some(APP_DATA),
-    );
-    assert_eq!(id, "local");
+    ));
 }
 
 #[test]
-fn 普通目录无记录是_local() {
-    let id = judge_identity(
-        "/home/u/.agents/skills/x",
-        "agents",
-        false,
-        None,
-        &[],
-        Some(APP_DATA),
-    );
-    assert_eq!(id, "local");
-}
-
-#[test]
-fn 软链但读不到目标是_external() {
-    // 读不到链接目标时保守处理：不动它是安全的默认
-    let id = judge_identity(
-        "/home/u/.agents/skills/x",
-        "agents",
+fn 指向别处的软链算外部管理() {
+    assert!(is_externally_managed(
         true,
-        None,
-        &[],
+        Some("/home/u/.cc-switch/skills/x"),
         Some(APP_DATA),
-    );
-    assert_eq!(id, "external");
+    ));
 }
 
 #[test]
-fn 按目录聚合后取最高优先级身份() {
-    // scan_dirs 已按 dir_name 聚合：一个技能一条，placements 里是全部落盘。
-    // 这里直接构造聚合后的形态，验证身份仍取最高优先级。
-    let mut item = scanned("grill-me", "agents", "/a/grill-me", false, None);
-    item.placements = vec![
+fn 软链但读不到目标时保守算外部管理() {
+    // 看不见的东西不该动
+    assert!(is_externally_managed(true, None, Some(APP_DATA)));
+}
+
+#[test]
+fn 不知道应用目录在哪时保守算外部管理() {
+    assert!(is_externally_managed(true, Some("/x"), None));
+}
+
+// ========== 聚合：外部管理标记 ==========
+
+#[test]
+fn 多工具混合时任一外部管理即标记为外部管理() {
+    let item = two_placements(
+        "grill-me",
+        // 普通目录
         spot("agents", "/a/grill-me", false, None),
-        // claude 那处是外部软链
+        // 外部软链
         spot("claude", "/c/grill-me", true, Some("/x/grill-me")),
-    ];
-    item.found_in = vec!["agents".into(), "claude".into()];
-
+    );
     let got = build_my_skills(&[item], &[], Some(APP_DATA));
-    assert_eq!(got.len(), 1, "聚合后一个技能一条");
-    assert_eq!(got[0].tools.len(), 2);
-    // /c 是非本应用的软链目标 → external 高于 /a 的 local
-    assert_eq!(got[0].identity, "external", "external 高于 local");
+    assert_eq!(got.len(), 1);
+    assert!(
+        got[0].externally_managed,
+        "任一落盘是外部软链就该标记"
+    );
 }
 
 #[test]
-fn managed_聚合后带出已记录版本() {
+fn 全普通目录不算外部管理() {
+    let item = two_placements(
+        "x",
+        spot("agents", "/a/x", false, None),
+        spot("claude", "/c/x", false, None),
+    );
+    let got = build_my_skills(&[item], &[], Some(APP_DATA));
+    assert!(!got[0].externally_managed);
+}
+
+#[test]
+fn 本客户端有记录的软链不算外部管理() {
+    // 即使是软链，只要本客户端记录过这个落点，就归自己管——
+    // 那是用户自己选的部署方式，不该被当成「别人的」拒绝卸载
+    let item = scanned(
+        "x",
+        "claude",
+        "/c/x",
+        true,
+        Some("/mnt/shared/skills/x"),
+    );
+    let r = rec("x", "claude", "/c/x");
+    let got = build_my_skills(&[item], &[r], Some(APP_DATA));
+    assert!(
+        !got[0].externally_managed,
+        "有记录的软链归本客户端管，可卸载"
+    );
+}
+
+// ========== 聚合：has_remote_source ==========
+
+#[test]
+fn 无_repo_path_时没有远端来源() {
+    let item = scanned("x", "claude", "/c/x", false, None);
+    let r = rec("x", "claude", "/c/x"); // repo_path 为 None
+    let got = build_my_skills(&[item], &[r], Some(APP_DATA));
+    assert!(!got[0].has_remote_source);
+}
+
+#[test]
+fn 有_repo_path_时有远端来源() {
+    let item = scanned("x", "claude", "/c/x", false, None);
+    let r = rec_with_source("x", "claude", "/c/x", Some("skills/通用/x"));
+    let got = build_my_skills(&[item], &[r], Some(APP_DATA));
+    assert!(got[0].has_remote_source);
+}
+
+#[test]
+fn 完全没有记录时没有远端来源() {
+    let item = scanned("x", "claude", "/c/x", false, None);
+    let got = build_my_skills(&[item], &[], Some(APP_DATA));
+    assert!(!got[0].has_remote_source);
+}
+
+#[test]
+fn 多工具任一有来源即算有来源() {
+    let item = two_placements(
+        "x",
+        spot("claude", "/c/x", false, None),
+        spot("agents", "/a/x", false, None),
+    );
+    // 只有 agents 那处有来源
+    let r = rec_with_source("x", "agents", "/a/x", Some("skills/通用/x"));
+    let got = build_my_skills(&[item], &[r], Some(APP_DATA));
+    assert!(got[0].has_remote_source, "任一落盘有来源就算有来源");
+}
+
+// ========== identity 字段恒为 installed ==========
+
+#[test]
+fn identity_恒为_installed() {
+    for (label, item) in [
+        ("普通目录", scanned("a", "claude", "/c/a", false, None)),
+        (
+            "外部软链",
+            scanned("b", "claude", "/c/b", true, Some("/x/b")),
+        ),
+    ] {
+        let got = build_my_skills(&[item], &[], Some(APP_DATA));
+        assert_eq!(got[0].identity, "installed", "{label} 的 identity 应统一");
+    }
+}
+
+// ========== 其它既有性质不受影响 ==========
+
+#[test]
+fn 聚合后带出已记录版本() {
     let mut r = rec("grill-me", "claude", "/c/grill-me");
     r.installed_version = Some("0.9.0".into());
-    // 聚合后的形态：一条记录、两个落盘
-    let mut item = scanned("grill-me", "claude", "/c/grill-me", false, None);
-    item.placements = vec![
+    let item = two_placements(
+        "grill-me",
         spot("claude", "/c/grill-me", false, None),
         spot("agents", "/a/grill-me", false, None),
-    ];
-    item.found_in = vec!["claude".into(), "agents".into()];
-
+    );
     let got = build_my_skills(&[item], &[r], Some(APP_DATA));
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].identity, "managed");
     assert_eq!(got[0].installed_version.as_deref(), Some("0.9.0"));
-    // 扫描本身不做远端比对，状态留空由 check_updates 填——
-    // 在这里编一个 UpToDate 等于撒谎
+    // 扫描本身不做远端比对，状态留空由 check_updates 填
     assert!(
         got[0].status.is_none(),
         "扫描不产生状态，避免未检查就显示「最新」"
@@ -183,11 +250,12 @@ fn managed_聚合后带出已记录版本() {
 }
 
 #[test]
-fn 非_managed_不给状态() {
-    // 没有来源就判不了，不猜
-    let list = vec![scanned("x", "cursor", "/c/x", false, None)];
+fn 扫描结果保持一个技能一条() {
+    let list = vec![
+        scanned("a", "cursor", "/c/a", false, None),
+        scanned("b", "cursor", "/c/b", false, None),
+    ];
     let got = build_my_skills(&list, &[], Some(APP_DATA));
-    let item: &MySkillItem = &got[0];
-    assert_eq!(item.identity, "local");
-    assert!(item.status.is_none(), "非 managed 不应有状态");
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|i: &MySkillItem| i.identity == "installed"));
 }
