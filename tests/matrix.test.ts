@@ -25,7 +25,9 @@ function item(
     targetPaths: targetPaths ?? tools.map((t) => `/home/u/.${t}/skills/${name}`),
     description: "",
     version: null,
-    identity: "managed",
+    identity: "installed",
+    externallyManaged: false,
+    hasRemoteSource: true,
     status: null,
     installedVersion: null,
   };

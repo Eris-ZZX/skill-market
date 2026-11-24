@@ -45,12 +45,6 @@ interface Props {
 
 type View = "bySkill" | "byTool" | "matrix";
 
-const IDENTITY_LABEL: Record<string, string> = {
-  managed: "本工具管理",
-  external: "外部管理",
-  local: "本地已有",
-};
-
 export default function InstalledPage({
   tools,
   updates,
@@ -117,15 +111,6 @@ export default function InstalledPage({
       setConfirmUninstall(null);
       await load();
       await refreshUpdates();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const adopt = async (name: string, tool: string, targetPath: string) => {
-    try {
-      await api.adoptSkill({ name, tool, targetPath });
-      await load();
     } catch (e) {
       setError(String(e));
     }
@@ -343,8 +328,8 @@ export default function InstalledPage({
       void openInstallFor(item, cell.tool);
       return;
     }
-    // external 的技能不是本工具装的，删了就是在动别人的东西
-    if (item.identity === "external") {
+    // 外部管理的技能不是本工具装的，删了就是在动别人的东西
+    if (item.externallyManaged) {
       setError(
         JSON.stringify({
           code: "EXTERNAL_MANAGED",
@@ -381,12 +366,16 @@ export default function InstalledPage({
   };
 
   const statusBadge = (item: MySkillItem) => {
-    if (item.identity === "external")
-      return <span className="badge">{IDENTITY_LABEL.external}</span>;
-    if (item.identity === "local")
-      return <span className="badge">{IDENTITY_LABEL.local}</span>;
+    // 外部管理的技能不参与更新判定（不是本客户端装的，改不改变无从比较）
+    if (item.externallyManaged)
+      return <span className="badge">外部管理</span>;
 
-    // managed：取该技能任一工具下最需要关注的状态，未检查时如实说「未检查」
+    // 无来源时 check_updates 会返回 UpToDate，那是「没得比」而不是「最新」。
+    // 显示「最新」等于骗用户，必须如实说无来源。
+    if (!item.hasRemoteSource)
+      return <span className="page-sub">无来源</span>;
+
+    // 取该技能任一工具下最需要关注的状态，未检查时如实说「未检查」
     const us = placements(item)
       .map((p) => updateOf(item.name, p.tool))
       .filter((x): x is UpdateCheckItem => x !== undefined);
@@ -536,10 +525,8 @@ export default function InstalledPage({
               }
               title="按身份筛选"
             >
-              <option value="all">身份：全部</option>
-              <option value="managed">本工具管理</option>
-              <option value="external">外部管理</option>
-              <option value="local">本地已有</option>
+              <option value="all">来源：全部</option>
+              <option value="external">只看外部管理</option>
             </select>
             <span className="page-sub" style={{ whiteSpace: "nowrap" }}>
               显示 {filtered.length} / {items.length}
@@ -583,9 +570,6 @@ export default function InstalledPage({
               <tbody>
                 {filtered.map((item) => {
                   const spots = placements(item);
-                  // 「本地已有」才提供纳入入口；external 一律不动
-                  const adoptable =
-                    item.identity === "local" && spots.length === 1;
                   return (
                     <tr key={item.name}>
                       <td style={{ fontWeight: 500 }}>
@@ -606,69 +590,56 @@ export default function InstalledPage({
                       <td>{statusBadge(item)}</td>
                       <td>{item.installedVersion ?? item.version ?? "—"}</td>
                       <td>
-                        {adoptable ? (
-                          <button
-                            className="primary sm"
-                            onClick={() =>
-                              adopt(item.name, spots[0].tool, spots[0].targetPath)
-                            }
-                          >
-                            纳入管理
-                          </button>
-                        ) : (
-                          item.identity === "managed" && (
-                            <div style={{ display: "flex", gap: 6 }}>
-                              {/* 只有「可更新」才给直接更新入口 */}
-                              {updateOf(item.name, spots[0].tool)?.status ===
-                                "updateavailable" && (
-                                <button
-                                  className="primary sm"
-                                  disabled={updating === `${item.name}-${spots[0].tool}`}
-                                  onClick={() => update(item.name, spots[0].tool)}
-                                >
-                                  {updating === `${item.name}-${spots[0].tool}` && (
-                                    <span className="spinner" />
-                                  )}
-                                  更新
-                                </button>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          {/* 只有「可更新」才给直接更新入口 */}
+                          {updateOf(item.name, spots[0].tool)?.status ===
+                            "updateavailable" && (
+                            <button
+                              className="primary sm"
+                              disabled={updating === `${item.name}-${spots[0].tool}`}
+                              onClick={() => update(item.name, spots[0].tool)}
+                            >
+                              {updating === `${item.name}-${spots[0].tool}` && (
+                                <span className="spinner" />
                               )}
-                              {/* 冲突与已修改都需要用户选一个处理方式 */}
-                              {(() => {
-                                const u = updateOf(item.name, spots[0].tool);
-                                if (!u) return null;
-                                if (u.status !== "conflict" && u.status !== "locallymodified")
-                                  return null;
-                                if (u.ignored)
-                                  return <span className="page-sub">已忽略此次更新</span>;
-                                return (
-                                  <button
-                                    className="primary sm"
-                                    onClick={() =>
-                                      setResolving({
-                                        name: item.name,
-                                        tool: spots[0].tool,
-                                        status: u.status,
-                                      })
-                                    }
-                                  >
-                                    处理
-                                  </button>
-                                );
-                              })()}
+                              更新
+                            </button>
+                          )}
+                          {/* 冲突与已修改都需要用户选一个处理方式 */}
+                          {(() => {
+                            const u = updateOf(item.name, spots[0].tool);
+                            if (!u) return null;
+                            if (u.status !== "conflict" && u.status !== "locallymodified")
+                              return null;
+                            if (u.ignored)
+                              return <span className="page-sub">已忽略此次更新</span>;
+                            return (
                               <button
-                                className="danger sm"
+                                className="primary sm"
                                 onClick={() =>
-                                  setConfirmUninstall({
+                                  setResolving({
                                     name: item.name,
-                                    placements: spots,
+                                    tool: spots[0].tool,
+                                    status: u.status,
                                   })
                                 }
                               >
-                                卸载
+                                处理
                               </button>
-                            </div>
-                          )
-                        )}
+                            );
+                          })()}
+                          <button
+                            className="danger sm"
+                            onClick={() =>
+                              setConfirmUninstall({
+                                name: item.name,
+                                placements: spots,
+                              })
+                            }
+                          >
+                            卸载
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -712,28 +683,17 @@ export default function InstalledPage({
                         <td>{it.installedVersion ?? it.version ?? "—"}</td>
                         <td>{statusBadge(it)}</td>
                         <td>
-                          {it.identity === "local" ? (
-                            <button
-                              className="primary sm"
-                              onClick={() =>
-                                adopt(it.name, spot.tool, spot.targetPath)
-                              }
-                            >
-                              纳入管理
-                            </button>
-                          ) : it.identity === "managed" ? (
-                            <button
-                              className="danger sm"
-                              onClick={() =>
-                                setConfirmUninstall({
-                                  name: it.name,
-                                  placements: [spot],
-                                })
-                              }
-                            >
-                              卸载
-                            </button>
-                          ) : null}
+                          <button
+                            className="danger sm"
+                            onClick={() =>
+                              setConfirmUninstall({
+                                name: it.name,
+                                placements: [spot],
+                              })
+                            }
+                          >
+                            卸载
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -848,16 +808,17 @@ export default function InstalledPage({
                           cell={cell}
                           skillName={item.name}
                           toolLabel={toolLabel(cell.tool, tools)}
-                          external={item.identity === "external"}
+                          external={item.externallyManaged}
                           onClick={() => onMatrixClick(item, cell)}
                         />
                       </td>
                     ))}
                     <td className="matrix-identity">
                       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <span className="badge">
-                          {IDENTITY_LABEL[item.identity] ?? item.identity}
-                        </span>
+                        {/* 身份三分类已废弃；只剩「外部管理」这一个需要提示的标记 */}
+                        {item.externallyManaged && (
+                          <span className="badge">外部管理</span>
+                        )}
                         <button
                           className="ghost sm"
                           title="批量操作"

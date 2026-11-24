@@ -286,9 +286,13 @@ export interface MySkillItem {
   targetPaths: string[];
   description: string;
   version: string | null;
-  /** managed | external | local */
-  identity: "managed" | "external" | "local";
-  /** 仅 managed 有值 */
+  /** 恒为 "installed"。三分类已废弃，保留字段只为类型兼容 */
+  identity: "installed";
+  /** 由外部工具（如 cc-switch）管理，本客户端不应卸载 */
+  externallyManaged: boolean;
+  /** 该技能是否有远端来源。无来源时状态是「没得比」而不是「最新」 */
+  hasRemoteSource: boolean;
+  /** 仅 hasRemoteSource 为真时有意义 */
   status: UpdateStatus | null;
   installedVersion: string | null;
 }
@@ -393,7 +397,7 @@ export type StatusFilter =
 /** 工具筛选：`all` 或工具 key */
 export type ToolFilter = "all" | string;
 /** 身份筛选 */
-export type IdentityFilter = "all" | "managed" | "external" | "local";
+export type IdentityFilter = "all" | "external";
 
 export interface FilterState {
   query: string;
@@ -437,7 +441,8 @@ export function applyFilters(
   const q = f.query.trim().toLowerCase();
 
   return items.filter((item) => {
-    if (f.identity !== "all" && item.identity !== f.identity) return false;
+    // 只剩「只看外部管理的」这一种筛法；三分类已废弃
+    if (f.identity === "external" && !item.externallyManaged) return false;
     if (f.tool !== "all" && !item.tools.includes(f.tool)) return false;
 
     // 状态看任一工具：一个技能可能装多处，任一处需要处理就该被筛选出来
@@ -480,16 +485,16 @@ const PENDING_STATUSES: UpdateStatus[] = [
 /**
  * 待处理条数：侧边栏角标与页内文案共用这一份口径
  *
- * 口径 = 身份为 local 的技能数 + managed 且状态需要处理的技能数。
+ * 口径 = 有来源且状态需要处理的技能数。
  * 已选「保留我的」的条目不再计入——用户已经表态过了。
+ * 外部管理与无来源的技能不计入：它们没有可比的状态。
  */
 export function countPending(
   items: MySkillItem[],
   updates: UpdateCheckItem[],
 ): number {
   return items.filter((i) => {
-    if (i.identity === "local") return true;
-    if (i.identity !== "managed") return false;
+    if (i.externallyManaged || !i.hasRemoteSource) return false;
     // 按 (技能名, 工具) 取状态：同名技能可能装在多个工具下，状态各不相同
     return placements(i).some((p) => {
       const u = updates.find((x) => x.name === i.name && x.tool === p.tool);
@@ -520,6 +525,12 @@ export const api = {
 
   listInstalled: () => invoke<InstalledSkill[]>("list_installed"),
   scanSkills: () => invoke<MySkillItem[]>("scan_skills"),
+  /**
+   * @deprecated 界面不再提供入口。#66 起所有技能统一视为已安装。
+   *
+   * 保留是因为后端命令仍在（可能有外部调用方）。它写入的 repoPath
+   * 恒为 null，纳管后仍然永远不能更新。
+   */
   adoptSkill: (args: { name: string; tool: string; targetPath: string }) =>
     invoke<InstalledSkill>("adopt_skill", args),
   stateHealth: () => invoke<string | null>("state_health"),
