@@ -646,7 +646,7 @@ export default function InstalledPage({
                 })}
               </tbody>
             </table>
-          ) : (
+          ) : view === "byTool" ? (
             byTool.map(([tool, rows]) => (
               <div key={tool} style={{ marginBottom: 20 }}>
                 <div
@@ -701,9 +701,7 @@ export default function InstalledPage({
                 </table>
               </div>
             ))
-          )}
-
-          {view === "matrix" && (
+          ) : (
             <>
               {openColumn && (
                 <div className="matrix-popover">
