@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+/** 列头浮层的目标宽度：与 styles.css 的 .matrix-popover max-width 一致 */
+const POPOVER_WIDTH = 320;
+/** 行菜单高度估算：两个按钮 + padding，与 styles.css 的 .matrix-menu 对齐 */
+const MENU_HEIGHT = 84;
 import BackupDialog from "../components/BackupDialog";
 import ErrorBanner from "../components/ErrorBanner";
 import InstallDialog from "../components/InstallDialog";
@@ -10,6 +15,10 @@ import {
   countPending,
   MySkillItem,
   matrixCells,
+  menuSide,
+  MenuSide,
+  popoverSide,
+  PopoverSide,
   MatrixCellState,
   RemoteSkill,
   parseError,
@@ -292,6 +301,96 @@ export default function InstalledPage({
   const [openColumn, setOpenColumn] = useState<string | null>(null);
   // 行级菜单打开的技能名
   const [rowMenu, setRowMenu] = useState<string | null>(null);
+  // 行菜单向上弹还是向下弹——打开时量一次，见 menuSide()
+  const [rowMenuSide, setRowMenuSide] = useState<MenuSide>("below");
+  // 列头浮层往哪侧延展——打开时量一次，见 popoverSide()
+  const [columnSide, setColumnSide] = useState<PopoverSide>("right");
+
+  // 两个浮层的引用：判断点击是否落在内部
+  const columnPopoverRef = useRef<HTMLDivElement | null>(null);
+  const rowMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const closeFloating = () => {
+    setOpenColumn(null);
+    setRowMenu(null);
+  };
+
+  /**
+   * 点外部 / 按 Esc 关闭
+   *
+   * mousedown 而不是 click：click 要等 mouseup，用户按住拖走再松手
+   * 会在拖动结束处误判成「点内部」。用 mousedown 更贴近直觉。
+   *
+   * 只看两个浮层的 ref，不关心是哪个按钮打开的——按钮自己负责 toggle，
+   * 这里只管「关」。
+   */
+  useEffect(() => {
+    if (!openColumn && !rowMenu) return;
+
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (columnPopoverRef.current?.contains(target)) return;
+      if (rowMenuRef.current?.contains(target)) return;
+      // 触发按钮自己负责 toggle：mousedown 先关、click 又开会变成「点不关」。
+      // 只认显式标记的触发器，不猜类名。
+      if (target.closest("[data-floating-trigger]")) return;
+      closeFloating();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeFloating();
+    };
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openColumn, rowMenu]);
+
+  /** 打开行菜单：量一次下方剩余空间，决定向上还是向下弹 */
+  const toggleRowMenu = (name: string, anchor: HTMLElement) => {
+    if (rowMenu === name) {
+      setRowMenu(null);
+      return;
+    }
+    // 表格在 .main（overflow-y: auto）里，绝对定位会被它裁剪，
+    // 所以要用滚动容器的可视底边，不是 window 底边
+    const scroller =
+      (anchor.closest(".main") as HTMLElement | null) ?? document.documentElement;
+    const box = scroller.getBoundingClientRect();
+    setRowMenuSide(
+      menuSide(box.bottom - anchor.getBoundingClientRect().bottom, MENU_HEIGHT),
+    );
+    setRowMenu(name);
+    // 两个浮层互斥
+    setOpenColumn(null);
+  };
+
+  /**
+   * 打开列头浮层：量一次左右剩余空间，决定往哪一侧延展
+   *
+   * 弹层宽 320px 上限，而列头只有 36px 宽，所以必然要挑一边。
+   * 只量一次、只在打开时量——展开过程中不重排，不会抖动。
+   */
+  const toggleColumnPopover = (tool: string, anchor: HTMLElement) => {
+    if (openColumn === tool) {
+      setOpenColumn(null);
+      return;
+    }
+    const scroller =
+      (anchor.closest(".main") as HTMLElement | null) ?? document.documentElement;
+    const view = scroller.getBoundingClientRect();
+    const box = anchor.getBoundingClientRect();
+    // extend-right（left:0）从列头左边缘向右铺，可用宽度到容器右缘；
+    // extend-left（right:0）从列头右边缘向左铺，可用宽度到容器左缘
+    setColumnSide(
+      popoverSide(box.right - view.left, view.right - box.left, POPOVER_WIDTH),
+    );
+    setOpenColumn(tool);
+    setRowMenu(null);
+  };
 
   /**
    * 批量执行：逐条独立
@@ -435,6 +534,67 @@ export default function InstalledPage({
     const warnish = u.status === "conflict" || u.status === "localmissing";
     const cls = warnish ? "badge warn" : "badge accent";
     return <span className={cls}>{st.text}</span>;
+  };
+
+  /**
+   * 列头浮层内容
+   *
+   * 单独抽出来是因为它现在挂在列头单元格内部（绝对定位），而不是表格
+   * 上方的流内元素。内容照旧依赖 filtered / runBulk，只是渲染位置变了。
+   *
+   * `side` 决定从列头哪一侧延展：默认向右（left: 0），靠近右边界时向左。
+   */
+  const columnPopover = (tool: string, side: PopoverSide) => {
+    const installed = resolveBulkScope(filtered, tool, true).alreadyDone.length;
+    const toInstall = filtered.length - installed;
+    return (
+      <div
+        className={`matrix-popover ${
+          side === "right" ? "extend-right" : "extend-left"
+        }`}
+        ref={columnPopoverRef}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+          {toolLabel(tool, tools)}
+        </div>
+        <div className="page-sub" style={{ marginBottom: 6 }}>
+          {installed} / {filtered.length} 个技能已装
+          {filters.query && `（当前筛选：${filtered.length} 个）`}
+        </div>
+        <button
+          className="ghost sm"
+          disabled={bulkBusy || toInstall === 0}
+          onClick={() => {
+            const scope = resolveBulkScope(filtered, tool, true);
+            setOpenColumn(null);
+            void runBulk(scope.targets, tool, true);
+          }}
+        >
+          装上其余 {toInstall} 个
+        </button>
+        <button
+          className="ghost sm"
+          disabled={bulkBusy || installed === 0}
+          onClick={() => {
+            const scope = resolveBulkScope(filtered, tool, false);
+            setOpenColumn(null);
+            void runBulk(scope.targets, tool, false);
+          }}
+        >
+          全部卸载（{installed} 个）
+        </button>
+        <button
+          className="ghost sm"
+          onClick={() => {
+            // 只看这一列 = 把工具筛选设为该工具
+            setFilters((f) => ({ ...f, tool }));
+            setOpenColumn(null);
+          }}
+        >
+          只看这一列
+        </button>
+      </div>
+    );
   };
 
   if (loading && items.length === 0) {
@@ -581,69 +741,6 @@ export default function InstalledPage({
             </span>
           </div>
 
-          {openColumn && (
-                <div className="matrix-popover">
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                    {toolLabel(openColumn, tools)}
-                  </div>
-                  {(() => {
-                    const installed = resolveBulkScope(
-                      filtered,
-                      openColumn,
-                      true,
-                    ).alreadyDone.length;
-                    const toInstall = filtered.length - installed;
-                    return (
-                      <>
-                        <div className="page-sub" style={{ marginBottom: 6 }}>
-                          {installed} / {filtered.length} 个技能已装
-                          {filters.query && `（当前筛选：${filtered.length} 个）`}
-                        </div>
-                        <button
-                          className="ghost sm"
-                          disabled={bulkBusy || toInstall === 0}
-                          onClick={() => {
-                            const scope = resolveBulkScope(
-                              filtered,
-                              openColumn,
-                              true,
-                            );
-                            setOpenColumn(null);
-                            void runBulk(scope.targets, openColumn, true);
-                          }}
-                        >
-                          装上其余 {toInstall} 个
-                        </button>
-                        <button
-                          className="ghost sm"
-                          disabled={bulkBusy || installed === 0}
-                          onClick={() => {
-                            const scope = resolveBulkScope(
-                              filtered,
-                              openColumn,
-                              false,
-                            );
-                            setOpenColumn(null);
-                            void runBulk(scope.targets, openColumn, false);
-                          }}
-                        >
-                          全部卸载（{installed} 个）
-                        </button>
-                        <button
-                          className="ghost sm"
-                          onClick={() => {
-                            // 只看这一列 = 把工具筛选设为该工具
-                            setFilters((f) => ({ ...f, tool: openColumn }));
-                            setOpenColumn(null);
-                          }}
-                        >
-                          只看这一列
-                        </button>
-                      </>
-                    );
-                  })()}
-                </div>
-              )}
               {bulkResult && (
                 <div className="banner info" style={{ marginBottom: 8 }}>
                   {bulkResult}
@@ -661,8 +758,9 @@ export default function InstalledPage({
                       count={matrixCounts[t] ?? 0}
                       total={filtered.length}
                       active={openColumn === t}
-                      onClick={() =>
-                        setOpenColumn((prev) => (prev === t ? null : t))
+                      onClick={(e) => toggleColumnPopover(t, e.currentTarget)}
+                      popover={
+                        openColumn === t ? columnPopover(t, columnSide) : null
                       }
                     />
                   ))}
@@ -753,17 +851,21 @@ export default function InstalledPage({
                           className="ghost sm"
                           title="批量操作"
                           disabled={bulkBusy}
-                          onClick={() =>
-                            setRowMenu((prev) =>
-                              prev === item.name ? null : item.name,
-                            )
+                          data-floating-trigger=""
+                          onClick={(e) =>
+                            toggleRowMenu(item.name, e.currentTarget)
                           }
                         >
                           ⋯
                         </button>
                       </div>
                       {rowMenu === item.name && (
-                        <div className="matrix-menu">
+                        <div
+                          className={`matrix-menu ${
+                            rowMenuSide === "above" ? "above" : "below"
+                          }`}
+                          ref={rowMenuRef}
+                        >
                           <button
                             className="ghost sm"
                             disabled={bulkBusy || matrixTools.length === 0}
