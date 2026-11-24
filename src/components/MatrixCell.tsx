@@ -1,6 +1,10 @@
 import { MatrixCellState } from "../api";
+// 仅本地静态资源，见下方 dangerouslySetInnerHTML 处的说明
+import claudeSvg from "../assets/icons/claude.svg?raw";
+import openaiSvg from "../assets/icons/openai.svg?raw";
+import qwenSvg from "../assets/icons/qwen.svg?raw";
 
-/** 工具的首字母占位。真图标是 #40 的范围，这里只保证列头能认。 */
+/** 工具的首字母占位。有真图标的工具仍保留字母，供 tooltip 与回退使用。 */
 const TOOL_GLYPH: Record<string, string> = {
   cursor: "C",
   claude: "CC",
@@ -8,6 +12,22 @@ const TOOL_GLYPH: Record<string, string> = {
   agents: "AG",
   qwenwork: "Q",
   workbuddy: "W",
+};
+
+/**
+ * 有开源单色图形的工具（来自 cc-switch，MIT）。
+ * 其余工具没有可用的开源图标，用品牌色 + 字母占位。
+ */
+const TOOL_ICON: Record<string, string> = {
+  claude: claudeSvg,
+  codex: openaiSvg,
+  qwenwork: qwenSvg,
+};
+
+/** 无图标工具的品牌色。取官方公开品牌色，白字保证对比度。 */
+const TOOL_BRAND: Record<string, string> = {
+  cursor: "#26251E",
+  workbuddy: "#0EC8A9",
 };
 
 export function toolGlyph(key: string): string {
@@ -91,7 +111,22 @@ export function MatrixHeader({
         aria-label={`${label} 批量操作`}
         onClick={onClick}
       >
-        <span className="matrix-glyph">{toolGlyph(toolKey)}</span>
+        {TOOL_ICON[toolKey] ? (
+          // dangerouslySetInnerHTML 只用于打包进 bundle 的本地静态 SVG
+          // （src/assets/icons/*.svg，经 Vite ?raw 内联为字符串）。
+          // 绝不用于任何远端/用户内容——那会变成 XSS 入口。
+          <span
+            className="matrix-glyph has-icon"
+            dangerouslySetInnerHTML={{ __html: TOOL_ICON[toolKey] }}
+          />
+        ) : (
+          <span
+            className={`matrix-glyph ${TOOL_BRAND[toolKey] ? "brand" : ""}`}
+            style={TOOL_BRAND[toolKey] ? { background: TOOL_BRAND[toolKey] } : undefined}
+          >
+            {toolGlyph(toolKey)}
+          </span>
+        )}
         <span className="matrix-count">{count}</span>
       </button>
     </th>
