@@ -896,6 +896,15 @@ input[type="checkbox"] {
 
 /* ========== 矩阵批量操作 ========== */
 
+/*
+ * 两个浮层都绝对定位，不占表格流内空间——否则展开时会把下面的行推下去，
+ * 点一下界面就跳。定位基准是各自的 <th> / <td>（都设了 position: relative）。
+ */
+.matrix-col,
+.matrix-identity {
+  position: relative;
+}
+
 .matrix-header-btn {
   display: inline-flex;
   flex-direction: column;
@@ -913,34 +922,76 @@ input[type="checkbox"] {
   background: var(--bg-sub);
 }
 
+/*
+ * 列头弹层：贴列头下方。
+ *
+ * 不做 translateX(-50%) 居中——列只有 36px 宽而弹层最多 320px，居中在
+ * 第 1 列会溢出左边、最后几列会溢出右边。改成按列位置靠边站：
+ * 左半边的列向左展开，右半边的列向右展开（见 popoverSide()）。
+ * 只要窗口宽于 2 倍弹层宽度，就落在容器内，无需运行时测量。
+ */
 .matrix-popover {
+  position: absolute;
+  top: 100%;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: stretch;
   padding: 10px 12px;
-  margin-bottom: 8px;
+  margin: 4px 0 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-sub);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  /* 列头单元格很窄，弹层靠自身宽度撑开 */
+  width: max-content;
   max-width: 320px;
+  text-align: left;
+  white-space: normal;
+  font-weight: 400;
+}
+
+.matrix-popover.extend-right {
+  left: 0;
+}
+
+.matrix-popover.extend-left {
+  right: 0;
 }
 
 .matrix-popover button {
   text-align: left;
 }
 
+/*
+ * 行菜单：默认贴按钮下方、右对齐（操作列在表格最右）。
+ * 下方空间不够时加 .above 改向上弹，见 menuSide()。
+ */
 .matrix-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-top: 4px;
+  margin: 4px 0 0;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-sub);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  min-width: 140px;
+}
+
+.matrix-menu.above {
+  top: auto;
+  bottom: 100%;
+  margin: 0 0 4px;
 }
 
 .matrix-menu button {
   text-align: left;
+  white-space: nowrap;
 }

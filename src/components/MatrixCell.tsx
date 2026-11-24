@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { MatrixCellState } from "../api";
 // 仅本地静态资源，见下方 dangerouslySetInnerHTML 处的说明
 import claudeSvg from "../assets/icons/claude.svg?raw";
@@ -90,8 +91,16 @@ interface HeaderProps {
   /** 当前筛选范围内的技能总数 */
   total: number;
   /** 展开菜单 */
-  onClick: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   active: boolean;
+  /**
+   * 展开时的浮层内容。
+   *
+   * 由调用方（InstalledPage）构造——那里才有 filtered / runBulk 等状态，
+   * 这里只负责挂到列头单元格内部。绝对定位相对 `th` 计算，所以不会
+   * 占据表格流内空间，展开时下面的行不会跳。
+   */
+  popover?: ReactNode;
 }
 
 export function MatrixHeader({
@@ -101,12 +110,15 @@ export function MatrixHeader({
   total,
   onClick,
   active,
+  popover,
 }: HeaderProps) {
   return (
     <th className="matrix-col">
+      {popover}
       <button
         type="button"
         className={`matrix-header-btn ${active ? "active" : ""}`}
+        data-floating-trigger=""
         title={`${label}：${count} / ${total} 个技能已装，点击查看批量操作`}
         aria-label={`${label} 批量操作`}
         onClick={onClick}

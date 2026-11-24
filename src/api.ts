@@ -557,6 +557,43 @@ export function countAlerts(updates: UpdateCheckItem[]): number {
   ).length;
 }
 
+/**
+ * 列头弹层往哪边延展
+ *
+ * `"right"` = 弹层从列头左边缘向右延展（CSS `left: 0`），
+ * `"left"` = 弹层从列头右边缘向左延展（CSS `right: 0`）。
+ *
+ * 光按「列在第几列」分左右半边不够：实测 640px 窗口下第 3 列（左半边）
+ * 向右延展仍会溢出右边界 16px。所以按实际剩余空间判断——优先选放得下
+ * 的那一侧，两边都放不下就选更宽敞的一侧（超宽部分由 max-width 兜底）。
+ */
+export type PopoverSide = "left" | "right";
+
+export function popoverSide(
+  spaceLeft: number,
+  spaceRight: number,
+  width: number,
+): PopoverSide {
+  if (spaceRight >= width) return "right";
+  if (spaceLeft >= width) return "left";
+  return spaceRight >= spaceLeft ? "right" : "left";
+}
+
+/**
+ * 行菜单该往下还是往上弹
+ *
+ * 表格在 `.main` 这个 overflow-y: auto 容器里，绝对定位的子元素会被它裁剪。
+ * 只看「是不是最后一行」不够——表格比视口高时，中间任何一行都可能是
+ * 视觉上的最后一行。所以打开时量一次「锚点到容器可视底边的距离」，
+ * 放不下就向上弹。这里只做上下二选一，不计算坐标，仍是 CSS 定位。
+ */
+export type MenuSide = "below" | "above";
+
+export function menuSide(spaceBelow: number, menuHeight: number): MenuSide {
+  // 8px 余量，免得刚好卡在边缘贴住
+  return spaceBelow < menuHeight + 8 ? "above" : "below";
+}
+
 // ========== API ==========
 
 export const api = {
