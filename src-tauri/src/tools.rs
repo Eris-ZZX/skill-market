@@ -25,7 +25,8 @@ pub enum ToolKind {
     Claude,
     /// Codex CLI —— `~/.codex/skills`
     Codex,
-    /// ChatGPT 桌面 / Agent Skills 约定 —— `~/.agents/skills`
+    /// Agent Skills 生态的通用技能目录 —— `~/.agents/skills`
+    /// 多个工具（Cursor / Codex / 其它兼容 Agent Skills 的工具）会读取它，不是 ChatGPT 专用。
     Agents,
     /// 千问办公 —— `~/.qwenworkcn/skills`
     QwenWork,
@@ -62,7 +63,7 @@ impl ToolKind {
             ToolKind::Cursor => "Cursor",
             ToolKind::Claude => "Claude Code",
             ToolKind::Codex => "Codex",
-            ToolKind::Agents => "ChatGPT / Agent Skills",
+            ToolKind::Agents => "Agent Skills",
             ToolKind::QwenWork => "千问办公",
             ToolKind::WorkBuddy => "WorkBuddy",
         }
@@ -287,5 +288,35 @@ mod tests {
         assert!(ToolKind::WorkBuddy.writes_volatile_fields());
         assert!(!ToolKind::Cursor.writes_volatile_fields());
         assert!(!ToolKind::Claude.writes_volatile_fields());
+    }
+
+    /// 防回归：key 是 state.json 里 tool 字段的取值，改了会让已有安装记录失配。
+    /// 显示名可以随便改，key 一个字节都不能动。
+    #[test]
+    fn agents_key_stays_agents() {
+        assert_eq!(ToolKind::Agents.key(), "agents");
+        assert_eq!(ToolKind::from_key("agents"), Some(ToolKind::Agents));
+    }
+
+    /// 显示名从「ChatGPT / Agent Skills」改为「Agent Skills」：
+    /// 这个目录是 Agent Skills 生态的通用位置，不是 ChatGPT 专用。
+    #[test]
+    fn agents_display_name_drops_chatgpt_prefix() {
+        assert_eq!(ToolKind::Agents.display_name(), "Agent Skills");
+        assert!(!ToolKind::Agents.display_name().contains("ChatGPT"));
+    }
+
+    /// 老 state.json 里 tool 字段存的是字面量 "agents"，必须仍能走通
+    /// 「反序列化 → from_key 匹配到工具」这条链路。
+    #[test]
+    fn legacy_state_with_agents_tool_still_resolves() {
+        let json = r#"{"tool":"agents"}"#;
+        #[derive(serde::Deserialize)]
+        struct ToolField {
+            tool: String,
+        }
+        let parsed: ToolField = serde_json::from_str(json).expect("老记录必须能反序列化");
+        assert_eq!(parsed.tool, "agents");
+        assert_eq!(ToolKind::from_key(&parsed.tool), Some(ToolKind::Agents));
     }
 }

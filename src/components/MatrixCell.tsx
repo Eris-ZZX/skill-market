@@ -4,8 +4,10 @@ import { MatrixCellState } from "../api";
 import claudeSvg from "../assets/icons/claude.svg?raw";
 import openaiSvg from "../assets/icons/openai.svg?raw";
 import qwenSvg from "../assets/icons/qwen.svg?raw";
+import cursorSvg from "../assets/icons/cursor.svg?raw";
+import workbuddySvg from "../assets/icons/workbuddy.svg?raw";
 
-/** 工具的首字母占位。有真图标的工具仍保留字母，供 tooltip 与回退使用。 */
+/** 工具的首字母占位：映射里没有的键兜底，也用于 tooltip 之外的回退 */
 const TOOL_GLYPH: Record<string, string> = {
   cursor: "C",
   claude: "CC",
@@ -16,19 +18,27 @@ const TOOL_GLYPH: Record<string, string> = {
 };
 
 /**
- * 有开源单色图形的工具（来自 cc-switch，MIT）。
- * 其余工具没有可用的开源图标，用品牌色 + 字母占位。
+ * 单色图标：填充为 currentColor，跟随界面文字色，浅色/深色主题都可见。
+ *
+ * 来源：claude / openai / qwen 取自 cc-switch（MIT），cursor 取自
+ * simple-icons（CC0）。都是单个 path，渲染 14px 居中在 20px 圆形底上。
  */
 const TOOL_ICON: Record<string, string> = {
   claude: claudeSvg,
   codex: openaiSvg,
   qwenwork: qwenSvg,
+  cursor: cursorSvg,
 };
 
-/** 无图标工具的品牌色。取官方公开品牌色，白字保证对比度。 */
-const TOOL_BRAND: Record<string, string> = {
-  cursor: "#26251E",
-  workbuddy: "#0EC8A9",
+/**
+ * 彩色图标：保留自身配色，不单色化。
+ *
+ * workbuddy 是官方品牌形象（绿色渐变底 + 黄色光晕 + 有机形状），本身自带
+ * 40×40 圆角色块。强行单色化会变成一个认不出的黑块，所以单独一档，
+ * 渲染 20px 占满整个格子、不要额外底色与边框。
+ */
+const TOOL_ICON_COLOR: Record<string, string> = {
+  workbuddy: workbuddySvg,
 };
 
 export function toolGlyph(key: string): string {
@@ -131,13 +141,14 @@ export function MatrixHeader({
             className="matrix-glyph has-icon"
             dangerouslySetInnerHTML={{ __html: TOOL_ICON[toolKey] }}
           />
-        ) : (
+        ) : TOOL_ICON_COLOR[toolKey] ? (
+          // 彩色图标自带圆角底色，占满 20px 即可，不要再套圆形底与边框
           <span
-            className={`matrix-glyph ${TOOL_BRAND[toolKey] ? "brand" : ""}`}
-            style={TOOL_BRAND[toolKey] ? { background: TOOL_BRAND[toolKey] } : undefined}
-          >
-            {toolGlyph(toolKey)}
-          </span>
+            className="matrix-glyph matrix-glyph-color"
+            dangerouslySetInnerHTML={{ __html: TOOL_ICON_COLOR[toolKey] }}
+          />
+        ) : (
+          <span className="matrix-glyph">{toolGlyph(toolKey)}</span>
         )}
         <span className="matrix-count">{count}</span>
       </button>

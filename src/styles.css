@@ -829,12 +829,23 @@ input[type="checkbox"] {
   display: block;
 }
 
-/* 品牌色字母块：白字保证在深色底与绿色底上都有足够对比度 */
-.matrix-glyph.brand {
-  color: #fff;
-  border-color: transparent;
-  font-size: 10px;
-  font-weight: 600;
+/*
+ * 彩色图标（workbuddy）：svg 自带 40×40 圆角色块与品牌配色，
+ * 直接占满 20px 格子就是完整图标，不要再叠圆形底色或边框。
+ *
+ * 关键是 overflow: hidden —— 官方 svg 里的 feGaussianBlur 光晕会画到
+ * viewBox 之外，不裁掉会漏出 .matrix-glyph 的 20px 边界。
+ */
+.matrix-glyph.matrix-glyph-color {
+  background: transparent;
+  border: none;
+  overflow: hidden;
+}
+
+.matrix-glyph.matrix-glyph-color svg {
+  width: 20px;
+  height: 20px;
+  display: block;
 }
 
 .matrix-count {
